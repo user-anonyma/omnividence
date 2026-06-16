@@ -102,14 +102,6 @@ The tool can search against:
 
 **Important**: This tool is for educational research and legitimate OSINT purposes only.
 
-- Do NOT use for unauthorized surveillance or stalking
-- Do NOT collect biometric data without consent (BIPA liability)
-- Do NOT scrape social media platforms (ToS violation, CFAA risk)
-- Respect all applicable laws (GDPR, BIPA, CFAA, local regulations)
-- Always obtain proper authorization before investigating individuals
-
-This tool deliberately uses public APIs and consensual data sources to minimize legal risk.
-
 ## Technical Stack
 
 - **Backend**: Python 3.10+ / Flask
