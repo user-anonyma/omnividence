@@ -1,0 +1,306 @@
+/**
+ * BatchProcessor Styles
+ * Batch upload UI styling
+ */
+
+.batch-processor {
+  width: 100%;
+  padding: 1rem;
+}
+
+.processor-container {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.processor-title {
+  margin: 0 0 1.5rem;
+  font-size: 1.5rem;
+  color: #333333;
+}
+
+.batch-drop-zone {
+  border: 2px dashed #cccccc;
+  border-radius: 8px;
+  padding: 2rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  background-color: #fafafa;
+  position: relative;
+}
+
+.batch-drop-zone:hover {
+  border-color: #0066cc;
+  background-color: #f0f7ff;
+}
+
+.batch-drop-zone:focus {
+  outline: none;
+  border-color: #0066cc;
+  box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
+}
+
+.batch-drop-zone input {
+  display: none;
+}
+
+.drop-zone-content {
+  pointer-events: none;
+}
+
+.drop-zone-icon {
+  width: 48px;
+  height: 48px;
+  color: #0066cc;
+  margin: 0 auto 1rem;
+}
+
+.drop-zone-text {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #333333;
+  margin: 0 0 0.5rem;
+}
+
+.drop-zone-subtext {
+  font-size: 0.875rem;
+  color: #666666;
+  margin: 0;
+}
+
+.files-list-container {
+  pointer-events: none;
+}
+
+.files-count {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #666666;
+}
+
+/* Messages */
+.error-message {
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 4px;
+  color: #856404;
+  font-size: 0.9rem;
+}
+
+.success-message {
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: #d4edda;
+  border: 1px solid #28a745;
+  border-radius: 4px;
+  color: #155724;
+  font-size: 0.9rem;
+}
+
+/* Files Section */
+.files-section {
+  margin-top: 2rem;
+  padding: 1.5rem;
+  background: white;
+  border: 1px solid #dddddd;
+  border-radius: 8px;
+}
+
+.files-section h3 {
+  margin: 0 0 1rem;
+  font-size: 1rem;
+  color: #333333;
+}
+
+.files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem;
+  background-color: #f9f9f9;
+  border: 1px solid #eeeeee;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.file-item:hover {
+  background-color: #f5f5f5;
+  border-color: #dddddd;
+}
+
+.file-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.file-name {
+  margin: 0 0 0.25rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #333333;
+  word-break: break-all;
+}
+
+.file-size {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #999999;
+}
+
+.remove-file-button {
+  margin-left: 1rem;
+  padding: 0.4rem 0.8rem;
+  background-color: #f5f5f5;
+  border: 1px solid #dddddd;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: #333333;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.remove-file-button:hover:not(:disabled) {
+  background-color: #ffebee;
+  border-color: #ef5350;
+  color: #d32f2f;
+}
+
+.remove-file-button:focus:not(:disabled) {
+  outline: 2px solid #0066cc;
+  outline-offset: -2px;
+}
+
+.remove-file-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Batch Actions */
+.batch-actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+}
+
+.process-button,
+.clear-all-button {
+  padding: 0.75rem 1.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  border: none;
+}
+
+.process-button {
+  background-color: #0066cc;
+  color: white;
+}
+
+.process-button:hover:not(:disabled) {
+  background-color: #0052a3;
+}
+
+.process-button:focus:not(:disabled) {
+  outline: 2px solid #003d7a;
+  outline-offset: -2px;
+}
+
+.process-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.clear-all-button {
+  background-color: #f0f0f0;
+  color: #333333;
+  border: 1px solid #cccccc;
+}
+
+.clear-all-button:hover:not(:disabled) {
+  background-color: #e0e0e0;
+}
+
+.clear-all-button:focus:not(:disabled) {
+  outline: 2px solid #0066cc;
+  outline-offset: -2px;
+}
+
+.clear-all-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .batch-processor {
+    padding: 0.75rem;
+  }
+
+  .batch-drop-zone {
+    padding: 1.5rem;
+  }
+
+  .drop-zone-icon {
+    width: 40px;
+    height: 40px;
+  }
+
+  .files-section {
+    padding: 1rem;
+  }
+
+  .batch-actions {
+    flex-direction: column;
+  }
+
+  .process-button,
+  .clear-all-button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .batch-drop-zone {
+    padding: 1rem;
+  }
+
+  .drop-zone-icon {
+    width: 32px;
+    height: 32px;
+  }
+
+  .drop-zone-text {
+    font-size: 0.9rem;
+  }
+
+  .drop-zone-subtext {
+    font-size: 0.8rem;
+  }
+
+  .file-item {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .remove-file-button {
+    margin-left: 0;
+    margin-top: 0.5rem;
+    width: 100%;
+    text-align: center;
+  }
+}

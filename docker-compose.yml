@@ -1,0 +1,109 @@
+version: '3.9'
+
+services:
+  # Flask API Backend
+  osint-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: osint-api
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=False
+      - SIMILARITY_THRESHOLD=0.6
+      - MAX_RESULTS=100
+      - CACHE_EXPIRY_HOURS=24
+      # Optional: Configure external services
+      # - REDIS_URL=redis://redis:6379/0
+      # - DATABASE_URL=sqlite:///./app.db
+    volumes:
+      # Persistent storage for FAISS indices
+      - ./data/indices:/tmp/osint_index
+      # Persistent storage for cached results
+      - ./data/cache:/tmp/osint_cache
+      # Persistent storage for uploaded images
+      - ./data/uploads:/tmp/osint_uploads
+      # Application logs
+      - ./logs/api:/app/logs
+    networks:
+      - osint-network
+    depends_on:
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+        labels: "service=osint-api"
+    labels:
+      description: "OSINT Face Search API Backend"
+      version: "1.0.0"
+
+  # Redis Cache (optional but recommended)
+  redis:
+    image: redis:7-alpine
+    container_name: osint-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - osint-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "2"
+
+  # PostgreSQL Database (optional, for metadata storage)
+  postgres:
+    image: postgres:15-alpine
+    container_name: osint-postgres
+    environment:
+      POSTGRES_USER: osint
+      POSTGRES_PASSWORD: changeme_secure_password
+      POSTGRES_DB: osint_db
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - osint-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U osint"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "2"
+
+networks:
+  osint-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+    driver: local
+  postgres-data:
+    driver: local

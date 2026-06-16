@@ -1,0 +1,39 @@
+# Face Recognition Engine + Vector Indexing - Production Dependencies
+
+# Core face recognition model (99.8% accuracy, ArcFace R100)
+insightface>=0.7.3
+
+# ONNX Runtime for efficient model inference
+# Includes both CPU and GPU support
+onnxruntime>=1.17.0
+
+# Image processing
+opencv-python>=4.8.0
+
+# Numerical computing and array operations
+numpy>=1.24.0,<2.0
+
+# Scientific computing
+scipy>=1.11.0
+
+# Utility for type hints
+typing-extensions>=4.8.0
+
+# Vector indexing and similarity search
+# CPU-only version - uncomment faiss-gpu for GPU support
+faiss-cpu>=1.7.4
+
+# Logging and monitoring (optional but recommended)
+python-logging-loki>=0.3.2
+
+# Development dependencies (optional, for testing)
+pytest>=7.4.0
+pytest-cov>=4.1.0
+mypy>=1.5.0
+
+# Optional: GPU acceleration (uncomment if using CUDA)
+# onnxruntime-gpu>=1.17.0
+# faiss-gpu>=1.7.4  # Replace faiss-cpu with this for GPU support
+
+# Optional: For advanced model optimization
+# onnx>=1.15.0
