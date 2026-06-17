@@ -1,218 +1,273 @@
-# Omnividence — Engineering Handoff & Fix Brief
+# Omnividence — Engineering Handoff
 
-Hand this whole file to Claude Code in the omnividence repo. It explains what the
-program is supposed to be, how each piece works, what is most likely broken, the
-datasets required, and a prioritized plan to get it actually functioning. Read it
-top to bottom before touching code.
+Read this top to bottom before touching code. It describes what Omnividence
+**is now** (v2.0.0), how the pieces fit, the exact shared interfaces every file
+implements to, and the honesty/safety rules that are enforced in code and UI.
+
+> v1.x was a different program: a local-FAISS-index "OSINT tool" that tried to be
+> a Clearview/PimEyes clone. That framing is **gone**. v2 is a **school
+> face-similarity search demo**: it sends a cropped face to reverse-image-search
+> providers and **locally re-ranks** the public results by face-embedding
+> similarity. There is no local face index and no identity claim anywhere.
 
 ---
 
 ## 1. What the program is
 
-Omnividence is a **face-recognition reverse image search / OSINT tool**. You give
-it a photo. It answers: *"where else does this face appear?"* It does that in two
-ways at once:
+Omnividence is a **school tech-showcase prototype for face-similarity search**,
+**NOT** a surveillance or identification system. You upload a photo. It:
 
-1. **Local search** — against a FAISS vector index built from face datasets you
-   have indexed (your own collected images, public datasets, etc.).
-2. **External reverse image search** — by querying public engines (Google Images,
-   TinEye, Bing, Yandex) with the uploaded image and scraping/aggregating results.
+1. Detects the **largest** visible face, crops + normalizes it, and embeds it to
+   a 512-d L2-normalized vector (the "query face").
+2. Sends the **cropped face JPEG** to reverse-image-search providers (SerpApi:
+   Google Lens, Yandex Images, Bing Images).
+3. Downloads each public result thumbnail, re-detects + embeds the largest face
+   in it, and computes cosine similarity to the query face.
+4. Maps cosine to a **0–100 face similarity score**, dedups by image URL, ranks,
+   persists to SQLite, and renders a ranked grid.
 
-On top of search it runs **image forensics**: AI-generated-image detection,
-photo-manipulation detection (Error Level Analysis + EXIF), and a basic deepfake
-check.
-
-It is NOT, and cannot cheaply become, a Clearview/PimEyes clone. Those work because
-they scraped billions of faces off the open web into a private index. Read section 6
-on this — it is the single biggest reason the tool "doesn't really work": there is
-no large index behind it, so there is nothing to match against.
+The output label is always **"face similarity score"**, never "match
+probability" or "identity confidence". The app **never names people** and only
+shows **public URLs** the providers returned.
 
 ---
 
-## 2. Architecture — how it's supposed to work
+## 2. Architecture
 
 ```
 omnividence/
-├── app.py                 # Flask backend, REST API (6 endpoints)
-├── face_engine.py         # face detection + 512-d embeddings (InsightFace)
-├── faiss_index.py         # FAISS vector search + SQLite metadata
-├── detection.py           # AI / manipulation / deepfake detection
-├── requirements.txt
-├── install.sh             # local installer (Python venv + npm)
-└── osint-react-frontend/  # React 18 UI (drag-drop upload, results grid)
+├── backend/                         # FastAPI, local-only (127.0.0.1:8000)
+│   ├── main.py                      # app: CORS, startup init_db()+init_model(), routes, /health
+│   ├── config.py                    # OMNI_* + SERPAPI_KEY env vars, paths, dir creation
+│   ├── requirements.txt
+│   ├── api/routes/
+│   │   ├── search.py                # ONLY place touching request/response JSON (orchestrator)
+│   │   └── forensics.py             # experimental, wrapped, off the search path
+│   ├── providers/
+│   │   ├── base.py                  # Provider ABC + ProviderResult/ProviderPage TypedDicts
+│   │   ├── __init__.py              # get_providers(api_key) registry
+│   │   ├── google_lens.py           # SerpApi engine=google_lens (MVP)
+│   │   ├── yandex.py                # SerpApi engine=yandex_images
+│   │   └── bing.py                  # SerpApi engine=bing_images
+│   ├── services/
+│   │   ├── face.py                  # InsightFace buffalo_l: detect largest, crop, embed 512-d L2
+│   │   ├── ranking.py               # SCORE_BANDS, cosine, to_score, band_for, rank_and_dedup
+│   │   ├── cache.py                 # ALL SQLite + thumbnail disk I/O + cursor state
+│   │   └── forensics.py             # experimental heuristics, wrapped
+│   └── data/                        # gitignored: omnividence.db, thumbs/, models/ (buffalo_l)
+└── frontend/                        # Next.js 14 app router, JS/JSX (:3000)
+    ├── app/                         # layout (always-visible Disclaimer), page, search/[id]
+    ├── components/                  # Uploader, ResultsGrid, ResultCard, ScoreBadge, Disclaimer, LoadMore, FilterSort, DetectionPanel
+    └── lib/                         # api.js, bands.js (verbatim mirror of ranking.py), types.js
 ```
 
-> **Deployment: local install only. There is no Docker in this project** — do not
-> add a Dockerfile or docker-compose. Setup is a Python venv for the backend and
-> npm for the frontend (see `install.sh` and section 8).
+> **Deployment: local install only. There is NO Docker in this project** — do
+> not add a Dockerfile or compose. Backend is a Python venv; frontend is npm.
+> See `install.sh` and the README.
 
-**Pipeline, end to end:**
+### Module ownership (do not cross these lines)
 
-1. **Detect + embed** (`face_engine.py`). InsightFace uses an SCRFD/RetinaFace
-   detector to find faces, crops + aligns each, then ArcFace (R100) produces a
-   **512-dimensional embedding** per face. Embeddings must be **L2-normalized** so
-   that cosine similarity = inner product.
-2. **Index + search** (`faiss_index.py`). Embeddings go into a FAISS index. Search
-   is nearest-neighbor by inner product (cosine on normalized vectors). A SQLite DB
-   stores per-vector metadata: image path, source URL, identity/label, bbox,
-   provenance. A search returns the top-k closest faces with similarity scores.
-3. **API** (`app.py`). Flask exposes:
-   - `POST /api/search` — upload image, return face matches
-   - `POST /api/batch` — batch process many images
-   - `GET  /api/results/<id>` — fetch cached results
-   - `POST /api/index` — add faces to the index
-   - `GET  /api/stats` — index statistics
-   - `GET  /health` — health check
-4. **External reverse search**. For each uploaded image, query Google/TinEye/Bing/
-   Yandex and aggregate the hits with source attribution. **See section 5 — this is
-   almost certainly faked or stubbed in the current code.**
-5. **Forensics** (`detection.py`). AI-gen detection (frequency-domain heuristics),
-   manipulation (ELA + EXIF inconsistency), deepfake (facial-landmark consistency).
-6. **Frontend**. React app on :3000 talks to Flask on :5000. Drag-drop upload,
-   results grid with similarity scores, source filtering.
-
-**Stack:** Python 3.10+ / Flask, InsightFace (ArcFace R100) on onnxruntime, FAISS,
-SQLite, React 18. Local install only (Python venv + npm) — no Docker.
+- `providers/base.py` — the `Provider` ABC and the normalized `ProviderResult` /
+  `ProviderPage` dict shapes every provider yields. **No provider fabricates
+  results.**
+- `services/face.py` — detect (largest face) + crop/normalize + embed. Owns
+  InsightFace.
+- `services/ranking.py` — cosine → 0–100, the score bands, and rank+dedup. The
+  **single source of truth** for bands.
+- `services/cache.py` — **all** SQLite and thumbnail-disk I/O plus pagination
+  cursor state. Nothing else touches the DB.
+- `api/routes/search.py` — orchestrates the pipeline and is the **only** place
+  that constructs request/response JSON.
 
 ---
 
-## 3. The features (what the UI/API should deliver)
+## 3. Pipeline, end to end
 
-- Face detection + 512-d embedding extraction from any uploaded image
-- Multi-face handling (an image with several people returns matches per face)
-- Local FAISS similarity search with ranked results + similarity scores
-- External reverse image search aggregation (Google/TinEye/Bing/Yandex)
-- Source attribution + clickable links per result
-- Source/type filtering (Instagram, LinkedIn, public records, etc.)
-- AI-generated image detection with confidence
-- Manipulation detection (ELA + EXIF)
-- Deepfake detection (landmark consistency)
-- Batch processing of many images
-- REST API for programmatic use
-- One-command local install (`install.sh`: Python venv + npm)
+`POST /api/search` (multipart `image`, optional `providers` CSV):
 
----
+1. Validate upload (size ≤ ~10 MB, decodable image) → else
+   `400 invalid_image`.
+2. `face.detect_largest_face(bytes)` → if `None`, `422 no_face_detected`.
+3. `face.crop_face_jpeg(...)` → the cropped-face JPEG (saved as
+   `query_thumb_path`, also sent to providers).
+4. `cache.create_search(embedding, bbox, det_score, query_thumb_path,
+   providers_used, note)` → `search_id` (uuid4 hex).
+5. For each selected provider: `provider.search(face_path, cursor=None)`. Un-
+   configured providers return `[]` + a "not configured" note (no key path).
+   Persist each provider's `next_cursor` / exhausted state via
+   `cache.upsert_cursor(...)`.
+6. For each `ProviderResult`: `cache.get_or_download_thumbnail(image_url,
+   thumbnail_url)` → embed via `face.embed_face(thumb_path)` → if a face is
+   found, `score = ranking.to_score(ranking.cosine(query, result))`; else
+   `score=None`, band `no_face`.
+7. `ranking.rank_and_dedup(rows)` → dedup by `image_url` (keep highest score),
+   sort score desc then (provider asc, image_url asc), assign 1-based `rank`,
+   set `band`.
+8. `cache.store_results(...)` (INSERT OR IGNORE on `UNIQUE(search_id,image_url)`)
+   then `cache.rerank_search(search_id)`.
+9. Return the page; `cache.mark_returned(...)` the rows sent. `has_more` =
+   `cache.any_more_available(search_id)`.
 
-## 4. Datasets needed (this is mandatory, not optional)
+`GET /api/search/{id}/more`: reload cursors, call `provider.search(face_path,
+cursor=saved_cursor)` for each non-exhausted provider, download+embed+score the
+new batch, **re-rank the whole search**, and return **only** the newly-added
+(previously unreturned) results.
 
-The local search is useless until the index has faces in it. You must build the
-index from real data. Options, roughly in order of ease:
-
-- **LFW** (Labeled Faces in the Wild) — ~13k images, 5.7k people. Great smoke-test
-  set: small, labeled, standard benchmark.
-- **CelebA / CelebA-HQ** — ~200k celebrity images / 30k high-res. Good for scale +
-  identity labels.
-- **VGGFace2** — ~3.3M images, 9k identities. This is the one for a serious index.
-- **Your own collected set** — for real OSINT use you index images you've gathered
-  with known identities. Each row needs: image, identity label, source URL.
-
-Indexing flow: run every dataset image through `face_engine.py` to get embeddings,
-write them to FAISS + the SQLite metadata table via `POST /api/index` (or a bulk
-loader script — build one, see task list). Without this step, every search returns
-empty and the app looks "broken" even when the code is fine.
-
-**Legal/ethical:** biometric search on real people is regulated (GDPR/BIPA, etc.).
-Keep it to public datasets, consented images, and authorized investigations. Put
-this constraint in the README and don't index scraped private data.
+**Determinism:** sort by score desc, then provider asc, then image_url asc.
+Dedup keeps the highest-scoring row per `image_url`. `no_face` (score `None`)
+ranks last.
 
 ---
 
-## 5. Why it's "not really working" — most likely root causes
+## 4. Scoring (single source of truth)
 
-Check these in order. In projects like this, the failure is almost always #1–#4,
-not the model code.
+Cosine is a **plain dot product** because both vectors are already
+L2-normalized. Score:
 
-1. **The index is empty.** No dataset was ever indexed, so `/api/search` returns
-   nothing. Fix: build a bulk indexer + index LFW as a smoke test. Confirm
-   `/api/stats` shows a non-zero vector count.
-2. **External engines are stubbed/mocked.** Google/TinEye/Bing/Yandex have **no
-   free face-search APIs**. The current code very likely returns hardcoded/fake
-   "results" or silently fails. Either (a) integrate a real provider (SerpAPI,
-   a paid TinEye API key, Bing Image Search API) and gate it behind an API key, or
-   (b) cut the feature honestly and label local-only. Do not ship fake results.
-3. **InsightFace model not downloaded / onnxruntime broken.** First run must pull
-   the model pack (e.g. `buffalo_l`). If onnxruntime isn't installed for the right
-   platform (CPU vs GPU/CUDA), face detection throws or returns zero faces. Verify
-   a single known image produces a 512-d vector before anything else.
-4. **Embeddings not normalized → wrong similarity.** If vectors aren't L2-normalized
-   and the FAISS index uses inner product, scores are garbage. Normalize on both
-   index and query side. Confirm same-person similarity ≈ high (>0.5), different
-   people low.
-5. **FAISS index type mismatch.** IVF/PQ indexes must be **trained** before adding
-   vectors and need enough vectors to be meaningful. For a first working version
-   use a flat index (`IndexFlatIP`) — exact, no training, correct by construction.
-   Optimize to IVF+PQ only once it works and the dataset is large.
-6. **Frontend ↔ backend mismatch.** React on :3000, Flask on :5000 — check the API
-   base URL the frontend uses and CORS on the Flask side. A "nothing happens on
-   upload" symptom is usually this, not the model.
-7. **detection.py is heuristic and unreliable.** Frequency-based AI detection and
-   landmark-based deepfake detection are weak and will produce confident-but-wrong
-   output. Treat as low-confidence/experimental, label clearly, or replace with a
-   real trained classifier later. Don't let it block the core search path.
-8. **Model cache / index not persisted.** The InsightFace model pack and the FAISS
-   index + SQLite DB must live in stable on-disk paths so they survive restarts and
-   aren't re-downloaded / rebuilt every run. Use fixed local paths, not temp dirs.
-
----
-
-## 6. The honesty section — set expectations correctly
-
-The "search the whole internet for this face" capability (Clearview/PimEyes) is not
-something this codebase can do as written, because:
-
-- There is **no public API** that does face search across the open web for free.
-- Replicating it means **scraping and indexing billions of face images** — massive
-  storage, compute, and serious legal exposure.
-
-What this tool **can** realistically be, done well:
-
-- A solid **local face search** over datasets you control (this is genuinely useful
-  and is the part to get rock-solid first).
-- **Reverse *image* search** (not face search) via paid/keyed providers, which finds
-  exact/near-duplicate images, not "the same person in a different photo."
-- A clean API + UI around both.
-
-Build the local search until it's excellent. Add external search only with a real,
-keyed provider, clearly labeled. Cut or flag the forensic heuristics.
-
----
-
-## 7. Prioritized fix plan (do these in order)
-
-1. **Get one image to embed.** Load InsightFace, run a single test photo, assert you
-   get N faces and a 512-d normalized vector. Fix model download / onnxruntime here.
-2. **Stand up a flat index.** Use `IndexFlatIP` + SQLite metadata. Add the test
-   vector, search it against itself, confirm similarity ≈ 1.0.
-3. **Write a bulk indexer script.** Point it at a dataset folder, embed every face,
-   populate FAISS + SQLite. Index **LFW** as the smoke test. Confirm `/api/stats`
-   shows the right count.
-4. **Wire `/api/search` to the real index.** Upload an image of someone in the
-   dataset, confirm they come back as the top match with a sane score. This is the
-   core loop working.
-5. **Fix the frontend↔backend connection.** Upload from the UI, see real results.
-   Resolve API base URL + CORS.
-6. **Decide on external search.** Either integrate one real keyed provider behind an
-   env var and label it, or remove the fake multi-engine results entirely.
-7. **Quarantine the forensics.** Mark AI/manipulation/deepfake detection as
-   experimental/low-confidence so it doesn't mislead. Improve later.
-8. **Persist state on disk.** Put the model cache + FAISS index + SQLite DB at fixed
-   local paths so they survive restarts. No Docker — local install only.
-9. **Write a real README** reflecting what it actually does, with the dataset setup
-   step front and center.
-
-Definition of done for "it works": index LFW, upload a photo of someone in LFW, get
-them back as the top match in the UI with a similarity score. Everything else is
-enhancement on top of that.
-
----
-
-## 8. Environment / setup notes
-
-- Python 3.10+, create a venv, `pip install -r requirements.txt`.
-- InsightFace needs onnxruntime (CPU) or onnxruntime-gpu (CUDA). Pick one and make
-  requirements.txt match the target machine.
-- First run downloads the model pack — needs internet once, then cache it.
-- Frontend: `cd osint-react-frontend && npm install && npm start` (:3000).
-- Backend: `python app.py` (:5000). Make the frontend's API base URL configurable.
-- Keep any external-search API keys in env vars, never hardcoded.
 ```
+score = round(((cosine + 1) / 2) * 100), clamped to [0, 100]
+```
+
+Bands live once in `backend/services/ranking.py` as `SCORE_BANDS` and are
+mirrored **verbatim** in `frontend/lib/bands.js` so the backend and `ScoreBadge`
+agree exactly:
+
+| key          | range  | label                        |
+|--------------|--------|------------------------------|
+| `very_close` | 95–100 | Very close visual similarity |
+| `strong`     | 85–94  | Strong visual similarity     |
+| `weak`       | 70–84  | Weak visual similarity       |
+| `unrelated`  | 0–69   | Likely unrelated             |
+| `no_face`    | null   | No face detected (ranks last)|
+
+If you change a band, change it in **both** files in the same commit. The words
+*match / identity / probability* must never appear next to a score — only
+*similarity*.
+
+---
+
+## 5. Storage (owned entirely by `services/cache.py`)
+
+SQLite (WAL), tables created idempotently by `init_db()` at startup. ISO-8601
+UTC timestamps.
+
+- `searches` — one row per upload. `query_embedding` is 512 float32
+  L2-normalized stored as `np.tobytes()` (2048 bytes). `query_face_bbox` is JSON
+  `[x1,y1,x2,y2]` in original-upload pixel coords. `note` is a JSON array of
+  human-readable strings.
+- `results` — one row per public image hit. `UNIQUE(search_id, image_url)`
+  enforces dedup. `score` is `0–100` or `NULL` (no face). `band` is one of the
+  five keys. `returned` is `0` (buffered) / `1` (sent). `rank` is the global
+  rank after the most recent re-rank.
+- `provider_cursors` — per `(search_id, provider)` continuation state:
+  `next_cursor` (opaque JSON string, `NULL` when exhausted), `page_index`,
+  `exhausted`.
+- `thumb_cache` — `image_url → thumb_path` with `status` `ok|failed`. Files at
+  `<OMNI_THUMB_CACHE_DIR>/<sha256(image_url)>.jpg`.
+
+`any_more_available()` is `True` if any provider is not exhausted **OR** any
+`results` row has `returned=0`.
+
+---
+
+## 6. Providers & pagination
+
+Every provider subclasses `Provider` (in `providers/base.py`) and implements
+`search(image_path, cursor=None) -> ProviderPage`.
+
+- **Key-gating is mandatory.** If `not self.is_configured()` return
+  `{"results": [], "next_cursor": None, "note": "<name>: provider not
+  configured (set SERPAPI_KEY)"}`.
+- **On any API/network error**, catch and return
+  `{"results": [], "next_cursor": None, "note": "<name>: <short error>"}` —
+  never raise, never fabricate.
+- On success, parse `results` from the SerpApi response; set `next_cursor` from
+  the engine's pagination (`google_lens` → page token; `yandex_images` /
+  `bing_images` → integer `page`/`first` offset encoded as JSON like
+  `{"page": 2}`) or `None` when there are no further pages.
+
+`get_providers(api_key)` returns
+`[GoogleLensProvider, YandexProvider, BingProvider]`. The route persists each
+returned `next_cursor` into `provider_cursors.next_cursor` and, on `/more`, calls
+each non-exhausted provider with its saved cursor, then updates the cursor (or
+marks `exhausted=1` when `next_cursor` is `None`).
+
+**This is the biggest architectural difference from v1:** there is no private
+face index to match against. Recall is whatever the public reverse-image
+engines surface; Omnividence's contribution is the **face-embedding re-rank** on
+top of those public results. Coverage and recall are bounded by the providers,
+and that is reported honestly (empty/not-configured notes).
+
+---
+
+## 7. Honesty / safety rules (HARD — enforced in code + UI)
+
+1. **Never fabricate results.** No `SERPAPI_KEY` ⇒ every provider returns `[]` +
+   a "provider not configured" note; the route still runs the full pipeline and
+   reports the empty/not-configured state honestly.
+2. **No identity claims, never name people** — only public URLs returned by
+   providers.
+3. **The label is always "face similarity score"**, never "match probability" /
+   "identity confidence".
+4. **The disclaimer** "Results are approximate visual similarity matches and do
+   not confirm identity." is **ALWAYS visible**, rendered once in
+   `app/layout.jsx` so it shows on every page and state.
+5. **Local install is the primary (only) path** — Python venv + npm. No Docker,
+   no Dockerfile.
+6. **The forensics panel is OPTIONAL + EXPERIMENTAL**, behind a toggle, wrapped
+   so it can NEVER block or fail the search path.
+
+The forensics endpoint (`POST /api/forensics`) is wrapped in try/except: any
+internal failure returns `200` with all checks `label="unavailable"` and a note,
+never a 5xx. It is never invoked on the search path.
+
+---
+
+## 8. Local setup
+
+Prereqs: Python 3.10+, Node 18+. Then:
+
+```bash
+bash install.sh          # backend venv + pip, frontend npm, copy env examples
+```
+
+Run (two terminals):
+
+```bash
+# backend
+source backend/.venv/bin/activate && cd backend && python main.py   # :8000
+# frontend
+cd frontend && npm run dev                                          # :3000
+```
+
+`buffalo_l` downloads into `backend/data/models` on first run (one-time).
+Set `SERPAPI_KEY` in `./.env` for live results; without it the app runs and
+reports providers as not configured. `GET /health` shows
+`{status, version, model_loaded, providers_configured}`.
+
+---
+
+## 9. Tests
+
+`backend/tests/`:
+
+- `test_ranking.py` — cosine→score mapping, band boundaries, dedup/rank
+  determinism (stable tie-break).
+- `test_providers_gating.py` — no-key path returns `[]` + note; never
+  fabricates.
+- `test_face.py` — smoke: detect + embed a sample face → 512-d L2-normalized
+  vector.
+
+```bash
+source backend/.venv/bin/activate && cd backend && pytest
+```
+
+---
+
+## 10. Versioning
+
+Semantic Versioning (Major.Minor.Patch). Current: **2.0.0** (in `VERSION`,
+reported by `/health` and `/version`). The 1.x → 2.0.0 bump reflects the full
+re-architecture from a local-index OSINT tool to a provider-driven,
+re-ranking face-similarity demo. After any change to the system, bump the
+version and commit.

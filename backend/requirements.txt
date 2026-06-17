@@ -1,0 +1,22 @@
+# Omnividence backend — local install (Python 3.10+ recommended)
+# Install into a venv:  python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+
+# --- Web framework / serving ---
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27,<1.0
+python-multipart>=0.0.9        # multipart/form-data uploads
+
+# --- Face detection + embedding (InsightFace buffalo_l on CPU) ---
+insightface>=0.7.3
+onnxruntime>=1.16,<2.0         # CPU execution provider
+opencv-python-headless>=4.8    # image decode/crop, no GUI deps
+numpy<2                        # InsightFace / onnxruntime are not numpy-2 clean
+Pillow>=10.0                   # JPEG encode for crops + forensics heuristics
+
+# --- Optional vector index (not required; brute-force cosine is the default path) ---
+# faiss-cpu>=1.7  ; uncomment if you want ANN over large result sets
+
+# --- HTTP / providers ---
+# httpx is the actual HTTP client used by the providers (SerpApi calls) and the
+# thumbnail downloader in services/cache.py. It MUST be installed.
+httpx>=0.27,<1.0               # SerpApi calls + thumbnail downloads
