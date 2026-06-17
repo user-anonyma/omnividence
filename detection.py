@@ -21,12 +21,22 @@ import traceback
 import hashlib
 from enum import Enum
 
+# Core deps. These are required for the heuristics to actually run, but a
+# missing dependency must NOT crash module import: detection is an OPTIONAL,
+# experimental feature and the search path must never be blocked by it. If the
+# imports fail we degrade gracefully and every detector reports MODEL_UNAVAILABLE.
 try:
     import cv2
     from PIL import Image
     import PIL.ExifTags
-except ImportError:
-    raise ImportError("Requires: pip install opencv-python pillow")
+    CV_AVAILABLE = True
+    _IMPORT_ERROR = None
+except ImportError as _e:  # pragma: no cover - depends on local install
+    CV_AVAILABLE = False
+    _IMPORT_ERROR = str(_e)
+    cv2 = None
+    Image = None
+    PIL = None
 
 # Optional dependencies with graceful fallbacks
 try:
@@ -77,14 +87,33 @@ class DetectionResult:
     message: str
 
     def to_dict(self) -> Dict:
-        """Convert result to dictionary."""
+        """Convert result to dictionary.
+
+        Every result is explicitly labeled experimental/low-confidence.
+        These heuristics are NOT validated and must not be relied upon for
+        decisions. Confidence is a heuristic signal, not a calibrated probability.
+        """
         return {
             "status": self.status.value,
             "confidence": round(self.confidence, 4),
             "is_anomaly": self.is_anomaly,
             "evidence": self.evidence,
-            "message": self.message
+            "message": self.message,
+            "experimental": True,
+            "reliability": "low"
         }
+
+
+def _unavailable_result() -> DetectionResult:
+    """Returned by every detector when image deps (cv2/PIL) are not installed.
+    Keeps the experimental forensics path non-fatal so search is never blocked."""
+    return DetectionResult(
+        status=DetectionStatus.MODEL_UNAVAILABLE,
+        confidence=0.0,
+        evidence={"reason": "image dependencies unavailable", "detail": _IMPORT_ERROR},
+        is_anomaly=False,
+        message="Experimental forensics unavailable (cv2/PIL not installed)"
+    )
 
 
 class AIGenerationDetector:
@@ -113,6 +142,8 @@ class AIGenerationDetector:
         Returns:
             DetectionResult with confidence score (0-1)
         """
+        if not CV_AVAILABLE:
+            return _unavailable_result()
         try:
             # Load image
             img = cv2.imread(str(image_path))
@@ -159,8 +190,9 @@ class AIGenerationDetector:
                 confidence=min(1.0, confidence),
                 evidence=evidence,
                 is_anomaly=is_anomaly,
-                message=f"AI generation confidence: {confidence:.2%}" if confidence > 0.5
-                        else "Image appears natural"
+                message=(f"Experimental heuristic: possible AI-generation signal "
+                         f"(~{confidence:.0%}, low confidence)" if confidence > 0.5
+                         else "No strong AI-generation signal (experimental heuristic)")
             )
 
         except Exception as e:
@@ -408,6 +440,8 @@ class ManipulationDetector:
         Returns:
             DetectionResult with confidence score (0-1)
         """
+        if not CV_AVAILABLE:
+            return _unavailable_result()
         try:
             image_path = Path(image_path)
 
@@ -448,8 +482,9 @@ class ManipulationDetector:
                 confidence=min(1.0, confidence),
                 evidence=evidence,
                 is_anomaly=is_anomaly,
-                message=f"Manipulation confidence: {confidence:.2%}" if confidence > 0.5
-                        else "No clear signs of manipulation detected"
+                message=(f"Experimental heuristic: possible manipulation signal "
+                         f"(~{confidence:.0%}, low confidence)" if confidence > 0.5
+                         else "No strong manipulation signal (experimental heuristic)")
             )
 
         except Exception as e:
@@ -681,6 +716,8 @@ class DeepfakeDetector:
         Returns:
             DetectionResult with confidence score (0-1)
         """
+        if not CV_AVAILABLE:
+            return _unavailable_result()
         try:
             img = cv2.imread(str(image_path))
             if img is None:
@@ -725,8 +762,9 @@ class DeepfakeDetector:
                 confidence=min(1.0, confidence),
                 evidence=evidence,
                 is_anomaly=is_anomaly,
-                message=f"Deepfake confidence: {confidence:.2%}" if confidence > 0.5
-                        else "No deepfake indicators detected"
+                message=(f"Experimental heuristic: possible deepfake signal "
+                         f"(~{confidence:.0%}, low confidence)" if confidence > 0.5
+                         else "No strong deepfake signal (experimental heuristic)")
             )
 
         except Exception as e:
@@ -1094,9 +1132,30 @@ class DetectionEngine:
 
         return self.deepfake_detector.detect(image_path)
 
+    @staticmethod
+    def _safe_call(name: str, fn, image_path: str) -> DetectionResult:
+        """Run a detector, converting any exception into a PROCESSING_ERROR
+        result so a failing heuristic can never propagate into the caller
+        (the search path must never be blocked by forensics)."""
+        try:
+            return fn(image_path)
+        except Exception as e:  # noqa: BLE001 - heuristics must never raise out
+            logger.warning(f"{name} detector raised, returning PROCESSING_ERROR: {e}")
+            return DetectionResult(
+                status=DetectionStatus.PROCESSING_ERROR,
+                confidence=0.0,
+                evidence={"error": str(e)},
+                is_anomaly=False,
+                message=f"Experimental detector error: {e}"
+            )
+
     def detect_all(self, image_path: str) -> Dict[str, DetectionResult]:
         """
         Run all detection methods on image.
+
+        Each detector call is wrapped so an exception returns a
+        PROCESSING_ERROR DetectionResult instead of propagating. This module
+        is experimental and MUST NOT block the search path.
 
         Args:
             image_path: Path to image file
@@ -1105,9 +1164,9 @@ class DetectionEngine:
             Dictionary with results from all detection methods
         """
         return {
-            "ai_generation": self.detect_ai(image_path),
-            "manipulation": self.detect_manipulation(image_path),
-            "deepfake": self.detect_deepfake(image_path)
+            "ai_generation": self._safe_call("ai_generation", self.detect_ai, image_path),
+            "manipulation": self._safe_call("manipulation", self.detect_manipulation, image_path),
+            "deepfake": self._safe_call("deepfake", self.detect_deepfake, image_path)
         }
 
     def get_summary(self, image_path: str) -> Dict:
@@ -1122,10 +1181,12 @@ class DetectionEngine:
         """
         results = self.detect_all(image_path)
 
-        overall_confidence = np.mean([
+        success_confidences = [
             r.confidence for r in results.values()
             if r.status == DetectionStatus.SUCCESS
-        ])
+        ]
+        # Guard: np.mean over an empty list yields nan + a RuntimeWarning.
+        overall_confidence = float(np.mean(success_confidences)) if success_confidences else 0.0
 
         anomalies = [
             name for name, result in results.items()
@@ -1133,32 +1194,41 @@ class DetectionEngine:
         ]
 
         return {
+            "experimental": True,
+            "reliability": "low",
+            "disclaimer": "Heuristic forensics — low confidence, not court-grade, "
+                          "do not rely on for decisions.",
             "image_path": str(image_path),
             "timestamp": str(Path(image_path).stat().st_mtime) if Path(image_path).exists() else None,
             "results": {
                 name: result.to_dict()
                 for name, result in results.items()
             },
-            "overall_risk_level": "HIGH" if overall_confidence > 0.7
-                                 else "MEDIUM" if overall_confidence > 0.5
-                                 else "LOW",
+            "overall_risk_level": "possible-high" if overall_confidence > 0.7
+                                 else "possible-medium" if overall_confidence > 0.5
+                                 else "low",
             "overall_confidence": round(overall_confidence, 4),
             "detected_anomalies": anomalies,
             "recommendation": self._get_recommendation(anomalies, overall_confidence)
         }
 
     def _get_recommendation(self, anomalies: list, confidence: float) -> str:
-        """Get recommendation based on detection results."""
+        """Get a deliberately hedged recommendation. These heuristics are
+        experimental and unvalidated, so wording avoids confident verdicts."""
         if not anomalies:
-            return "Image appears authentic. No concerning artifacts detected."
+            return ("No strong artifacts surfaced by these experimental heuristics. "
+                    "This is not proof of authenticity.")
 
         if confidence > 0.8:
-            return "ALERT: High confidence of inauthenticity. Manual review recommended."
+            return ("Possible signs of inauthenticity (experimental heuristic, low "
+                    "confidence). Manual review suggested; do not treat as conclusive.")
 
         if confidence > 0.65:
-            return "Possible signs of manipulation or generation. Recommend verification."
+            return ("Possible signs of manipulation or generation (experimental "
+                    "heuristic, low confidence). Independent verification suggested.")
 
-        return "Minor anomalies detected. May require further investigation."
+        return ("Minor heuristic anomalies noted (experimental, low confidence). "
+                "Not conclusive.")
 
 
 # Example usage and testing
@@ -1190,16 +1260,18 @@ if __name__ == "__main__":
         print(f"\nDeepfake Detection:\n{result.to_dict()}")
     else:  # all
         summary = engine.get_summary(image_path)
-        print(f"\nComprehensive Detection Summary:")
+        print(f"\nExperimental Forensics Summary (low confidence — not court-grade):")
         print(f"\nImage: {summary['image_path']}")
         print(f"Overall Risk Level: {summary['overall_risk_level']}")
         print(f"Overall Confidence: {summary['overall_confidence']:.2%}")
         print(f"Detected Anomalies: {summary['detected_anomalies']}")
         print(f"Recommendation: {summary['recommendation']}")
+        print(f"Disclaimer: {summary['disclaimer']}")
         print(f"\nDetailed Results:")
         for test_name, result in summary['results'].items():
             print(f"\n{test_name.replace('_', ' ').title()}:")
             print(f"  Confidence: {result['confidence']:.2%}")
             print(f"  Status: {result['status']}")
+            print(f"  Experimental: {result['experimental']} (reliability: {result['reliability']})")
             if result['is_anomaly']:
-                print(f"  ANOMALY DETECTED")
+                print(f"  POSSIBLE ANOMALY (experimental, low confidence)")

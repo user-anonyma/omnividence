@@ -23,6 +23,14 @@ typing-extensions>=4.8.0
 # CPU-only version - uncomment faiss-gpu for GPU support
 faiss-cpu>=1.7.4
 
+# Flask REST backend (app.py) + CORS for the local React dev server
+Flask>=3.0.0
+flask-cors>=4.0.0
+Werkzeug>=3.0.0
+
+# Image I/O for the experimental forensics module (detection.py EXIF/ELA)
+Pillow>=10.0.0
+
 # Logging and monitoring (optional but recommended)
 python-logging-loki>=0.3.2
 

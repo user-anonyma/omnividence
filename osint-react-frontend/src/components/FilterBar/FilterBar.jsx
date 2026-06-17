@@ -111,17 +111,17 @@ export const FilterBar = ({ onFiltersChange, onLoading = null }) => {
           ) : sources.length > 0 ? (
             <div className="checkbox-group">
               {sources.map((source) => (
-                <div key={source.id} className="checkbox-item">
+                <div key={source.value} className="checkbox-item">
                   <input
                     type="checkbox"
-                    id={`source-${source.id}`}
-                    checked={selectedSources.includes(source.id)}
-                    onChange={() => handleSourceToggle(source.id)}
+                    id={`source-${source.value}`}
+                    checked={selectedSources.includes(source.value)}
+                    onChange={() => handleSourceToggle(source.value)}
                     className="checkbox-input"
-                    aria-label={`Filter by ${source.name}`}
+                    aria-label={`Filter by ${source.label}`}
                   />
-                  <label htmlFor={`source-${source.id}`} className="checkbox-label">
-                    <span className="source-name">{source.name}</span>
+                  <label htmlFor={`source-${source.value}`} className="checkbox-label">
+                    <span className="source-name">{source.label}</span>
                     {source.count !== undefined && (
                       <span className="source-count">({source.count})</span>
                     )}
@@ -156,11 +156,11 @@ export const FilterBar = ({ onFiltersChange, onLoading = null }) => {
                 Similarity {(similarityThreshold * 100).toFixed(0)}%+
               </span>
             )}
-            {selectedSources.map((sourceId) => {
-              const source = sources.find((s) => s.id === sourceId);
+            {selectedSources.map((sourceValue) => {
+              const source = sources.find((s) => s.value === sourceValue);
               return source ? (
-                <span key={sourceId} className="filter-tag">
-                  {source.name}
+                <span key={sourceValue} className="filter-tag">
+                  {source.label}
                 </span>
               ) : null;
             })}

@@ -14,7 +14,6 @@ import { SORT_OPTIONS } from './config/api';
 import './App.css';
 
 function App() {
-  const [currentImageId, setCurrentImageId] = useState(null);
   const [results, setResults] = useState([]);
   const [sortedResults, setSortedResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -76,113 +75,47 @@ function App() {
     }
   }, []);
 
-  const handleImageUploadSuccess = useCallback(
-    async (uploadData) => {
-      try {
-        setCurrentImageId(uploadData.image_id);
-        setSearchError(null);
-        setResults([]);
-        setIsSearching(true);
-
-        const searchResults = await apiClient.searchImage(
-          uploadData.image_id,
-          filters
-        );
-
-        if (searchResults.success && searchResults.data) {
-          setResults(searchResults.data);
-        } else {
-          throw new Error(searchResults.error || 'Search failed');
-        }
-      } catch (error) {
-        const errorMessage =
-          error instanceof APIError ? error.message : error.message;
-        setSearchError(errorMessage);
-        setResults([]);
-      } finally {
-        setIsSearching(false);
-      }
-    },
-    [filters]
-  );
+  const handleImageUploadSuccess = useCallback((uploadData) => {
+    // One-step flow: the uploaded image IS the query, so the ranked matches
+    // are already present at uploadData.results (response.data.results).
+    setSearchError(null);
+    setIsSearching(false);
+    setResults(Array.isArray(uploadData?.results) ? uploadData.results : []);
+  }, []);
 
   const handleImageUploadError = useCallback((error) => {
     setSearchError(error);
     setResults([]);
   }, []);
 
-  const handleBatchUploadSuccess = useCallback(
-    async (uploadData) => {
-      try {
-        setSearchError(null);
-        setResults([]);
-        setIsSearching(true);
+  const handleBatchUploadSuccess = useCallback((uploadData) => {
+    // One-step flow: /api/batch already returns per-image matches.
+    // Flatten data.results[].matches into a single ranked list.
+    setSearchError(null);
+    setIsSearching(false);
 
-        if (uploadData.image_ids && uploadData.image_ids.length > 0) {
-          const batchResults = await apiClient.searchBatch(
-            uploadData.image_ids,
-            filters
-          );
-
-          if (batchResults.success && batchResults.data) {
-            // Flatten results from multiple images
-            const allResults = batchResults.data.reduce(
-              (acc, imageResults) => [...acc, ...imageResults.matches],
-              []
-            );
-            setResults(allResults);
-          } else {
-            throw new Error(batchResults.error || 'Batch search failed');
-          }
-        }
-      } catch (error) {
-        const errorMessage =
-          error instanceof APIError ? error.message : error.message;
-        setSearchError(errorMessage);
-        setResults([]);
-      } finally {
-        setIsSearching(false);
-      }
-    },
-    [filters]
-  );
+    const perImage = Array.isArray(uploadData?.results)
+      ? uploadData.results
+      : [];
+    const allMatches = perImage.reduce(
+      (acc, image) =>
+        Array.isArray(image?.matches) ? [...acc, ...image.matches] : acc,
+      []
+    );
+    setResults(allMatches);
+  }, []);
 
   const handleBatchUploadError = useCallback((error) => {
     setSearchError(error);
     setResults([]);
   }, []);
 
-  const handleFiltersChange = useCallback(
-    async (newFilters) => {
-      setFilters(newFilters);
-
-      // Re-search with new filters if we have results
-      if (currentImageId && results.length > 0) {
-        try {
-          setIsSearching(true);
-          setSearchError(null);
-
-          const searchResults = await apiClient.searchImage(
-            currentImageId,
-            newFilters
-          );
-
-          if (searchResults.success && searchResults.data) {
-            setResults(searchResults.data);
-          } else {
-            throw new Error(searchResults.error || 'Search failed');
-          }
-        } catch (error) {
-          const errorMessage =
-            error instanceof APIError ? error.message : error.message;
-          setSearchError(errorMessage);
-        } finally {
-          setIsSearching(false);
-        }
-      }
-    },
-    [currentImageId, results]
-  );
+  const handleFiltersChange = useCallback((newFilters) => {
+    // One-step backend has no stateful re-query; the image IS the query.
+    // Source/threshold filtering is applied server-side at upload time, so
+    // here we just record the selection (re-upload to apply server filters).
+    setFilters(newFilters);
+  }, []);
 
   const handleSortChange = useCallback((newSort) => {
     setCurrentSort(newSort);

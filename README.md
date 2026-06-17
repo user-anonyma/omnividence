@@ -13,7 +13,6 @@
 - **Source Filtering**: Filter results by website/source type (Instagram, LinkedIn, Twitter, public records, etc.)
 - **Batch Processing**: Process 100+ images concurrently
 - **API Access**: RESTful API for programmatic searches
-- **Docker Ready**: One-command deployment with docker-compose
 
 ## Use Cases
 
@@ -25,17 +24,29 @@
 
 ## Quick Start
 
-### Option 1: Docker (Recommended)
+Local install only. Run the one-shot installer:
 
 ```bash
 git clone https://github.com/user-anonyma/omnividence.git
 cd omnividence
-docker-compose up
+bash install.sh
+```
+
+Then start the two processes (in separate terminals):
+
+```bash
+# Backend (terminal 1)
+source venv/bin/activate
+python app.py            # Runs on http://localhost:5000
+
+# Frontend (terminal 2)
+cd osint-react-frontend
+npm start                # Runs on http://localhost:3000
 ```
 
 Then open http://localhost:3000 in your browser.
 
-### Option 2: Local Setup
+### Manual setup (if you skip install.sh)
 
 ```bash
 # Backend
@@ -109,7 +120,7 @@ The tool can search against:
 - **Vector Search**: FAISS (IVF+PQ)
 - **Database**: SQLite
 - **Frontend**: React 18
-- **Deployment**: Docker / docker-compose
+- **Deployment**: Local install (Python venv + npm)
 
 ## Development
 
@@ -122,8 +133,7 @@ omnividence/
 ├── faiss_index.py        # Vector search
 ├── detection.py          # AI/manipulation detection
 ├── requirements.txt      # Python dependencies
-├── docker-compose.yml    # Local development setup
-├── Dockerfile            # Production container
+├── install.sh            # Local installer (venv + npm)
 ├── osint-react-frontend/ # React UI
 └── README.md            # This file
 ```

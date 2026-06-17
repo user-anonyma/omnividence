@@ -298,39 +298,6 @@ npm run build
 # Configure server to serve index.html for all routes
 ```
 
-### Docker Deployment
-
-Create `Dockerfile`:
-
-```dockerfile
-FROM node:16-alpine
-
-WORKDIR /app
-
-COPY package*.json ./
-RUN npm install
-
-COPY src ./src
-COPY public ./public
-
-ENV REACT_APP_API_URL=http://api:5000/api
-
-RUN npm run build
-
-FROM nginx:alpine
-COPY --from=0 /app/build /usr/share/nginx/html
-
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
-```
-
-Build and run:
-
-```bash
-docker build -t osint-frontend .
-docker run -p 80:80 osint-frontend
-```
-
 ## Performance Optimization
 
 ### Code Splitting

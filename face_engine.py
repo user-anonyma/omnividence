@@ -1,44 +1,56 @@
 """
 Face Recognition Engine Module
-Provides high-accuracy face detection and embedding extraction using InsightFace ArcFace R100.
+==============================
 
-Production-ready face recognition module supporting:
-- Multiple image formats (JPEG, PNG, WebP)
-- Batch face extraction and embedding generation
-- Comprehensive error handling and logging
-- Type hints for IDE support
-- Edge case handling (multiple faces, poor lighting, small faces)
+Local-only face detection + 512-dimensional ArcFace embeddings via InsightFace
+(buffalo_l: SCRFD detection + ArcFace R100 recognition).
 
-Author: OSINT Face Search Team
+This module is the SOLE producer of embeddings for Omnividence. Every embedding
+it emits is:
+  - dimension 512
+  - dtype float32
+  - L2 unit-normalized (so inner product == cosine similarity in [-1, 1])
+
+CPU-only by default (use_gpu=False). No Docker, no GPU assumption. The CUDA
+execution provider is only used when onnxruntime actually exposes it.
+
+extract_faces() ALWAYS returns a FaceExtractionResult object (with .status and
+.faces), never a bare list.
+
+Author: Omnividence
 License: MIT
 """
 
 import logging
-import numpy as np
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Union
-from dataclasses import dataclass
-from enum import Enum
 import traceback
+from pathlib import Path
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import List, Dict, Optional, Tuple, Union
+
+import numpy as np
 
 try:
-    import insightface
     from insightface.app import FaceAnalysis
-except ImportError:
+except ImportError:  # pragma: no cover - import guard
     raise ImportError(
-        "insightface not found. Install with: pip install insightface onnxruntime"
+        "insightface not found. Install with: pip install insightface onnxruntime opencv-python"
     )
 
-# Configure logging
+# Configure module logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
+# Embedding contract constants (shared across engine, index, app, build_index)
+EMBEDDING_DIM = 512
+
 
 class FaceDetectionStatus(Enum):
-    """Enumeration of face detection result statuses."""
+    """Status of a face extraction attempt on a single image."""
+
     SUCCESS = "success"
     NO_FACES_DETECTED = "no_faces_detected"
     POOR_QUALITY = "poor_quality"
@@ -48,71 +60,58 @@ class FaceDetectionStatus(Enum):
 
 @dataclass
 class BoundingBox:
-    """Represents a face bounding box in image coordinates."""
+    """Axis-aligned face bounding box in image pixel coordinates."""
+
     x1: float
     y1: float
     x2: float
     y2: float
 
     def width(self) -> float:
-        """Calculate bounding box width."""
         return self.x2 - self.x1
 
     def height(self) -> float:
-        """Calculate bounding box height."""
         return self.y2 - self.y1
 
     def area(self) -> float:
-        """Calculate bounding box area."""
         return self.width() * self.height()
 
     def to_dict(self) -> Dict[str, float]:
-        """Convert to dictionary representation."""
         return {
             "x1": float(self.x1),
             "y1": float(self.y1),
             "x2": float(self.x2),
             "y2": float(self.y2),
             "width": float(self.width()),
-            "height": float(self.height())
+            "height": float(self.height()),
         }
 
 
 @dataclass
 class Face:
-    """Represents a detected face with embedding and metadata."""
-    embedding: np.ndarray  # 512-dimensional normalized vector
+    """A detected face: 512-d L2-normalized embedding plus metadata."""
+
+    embedding: np.ndarray  # shape (512,), float32, L2-normalized
     bounding_box: BoundingBox
-    confidence: float  # Detection confidence [0, 1]
-    landmarks: Optional[np.ndarray] = None  # 5-point face landmarks
+    confidence: float  # detection confidence in [0, 1]
+    landmarks: Optional[np.ndarray] = None  # 5-point keypoints from detection.kps
 
     def to_dict(self, include_embedding: bool = False) -> Dict:
-        """
-        Convert face to dictionary representation.
-
-        Args:
-            include_embedding: Whether to include the embedding vector (large)
-
-        Returns:
-            Dictionary with face data
-        """
-        result = {
+        result: Dict = {
             "bounding_box": self.bounding_box.to_dict(),
             "confidence": float(self.confidence),
         }
-
         if include_embedding and self.embedding is not None:
-            result["embedding"] = self.embedding.tolist()
-
+            result["embedding"] = np.asarray(self.embedding, dtype=np.float32).tolist()
         if self.landmarks is not None:
-            result["landmarks"] = self.landmarks.tolist()
-
+            result["landmarks"] = np.asarray(self.landmarks).tolist()
         return result
 
 
 @dataclass
 class FaceExtractionResult:
-    """Result of face extraction from a single image."""
+    """Result of extracting faces from a single image."""
+
     status: FaceDetectionStatus
     faces: List[Face]
     num_faces: int
@@ -121,507 +120,364 @@ class FaceExtractionResult:
     processing_time_ms: float = 0.0
 
     def to_dict(self, include_embeddings: bool = False) -> Dict:
-        """
-        Convert result to dictionary representation.
-
-        Args:
-            include_embeddings: Whether to include face embeddings
-
-        Returns:
-            Dictionary representation of extraction result
-        """
         return {
             "status": self.status.value,
             "num_faces": self.num_faces,
             "faces": [f.to_dict(include_embeddings) for f in self.faces],
-            "image_shape": self.image_shape,
+            "image_shape": list(self.image_shape) if self.image_shape else None,
             "error_message": self.error_message,
-            "processing_time_ms": float(self.processing_time_ms)
+            "processing_time_ms": float(self.processing_time_ms),
         }
 
 
 class FaceEngine:
     """
-    High-accuracy face recognition engine using InsightFace ArcFace R100.
+    Local face recognition engine using InsightFace buffalo_l.
 
-    Provides:
-    - Face detection and localization
-    - 512-dimensional face embeddings
-    - Batch processing support
-    - Comprehensive error handling
-
-    Features:
-    - 99.8% accuracy on LFW benchmark
-    - Support for multiple image formats
-    - Automatic hardware detection (GPU/CPU)
-    - Edge case handling (multiple faces, poor lighting)
+    - SCRFD detector + ArcFace R100 recognizer (512-d embeddings)
+    - CPU-only by default; GPU provider used only if actually present
+    - Produces L2-normalized float32 embeddings (cosine == inner product)
     """
 
-    # Supported image formats
-    SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'}
+    SUPPORTED_FORMATS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
-    # Minimum face size in pixels for reliable recognition
-    MIN_FACE_SIZE = 20  # Faces smaller than this are likely noise
+    # Minimum face side (px); faces smaller than this are likely noise/artifacts.
+    MIN_FACE_SIZE = 20
 
-    # Detection confidence threshold (0-1)
+    # Default detection confidence threshold.
     MIN_DETECTION_CONFIDENCE = 0.5
 
-    # Embedding dimension for ArcFace R100
-    EMBEDDING_DIMENSION = 512
+    EMBEDDING_DIMENSION = EMBEDDING_DIM
 
     def __init__(
         self,
-        model_name: str = "buffalo_l",  # ArcFace R100 model
-        providers: Optional[List[str]] = None,
-        use_gpu: bool = True,
-        verbose: bool = False
+        model_name: str = "buffalo_l",
+        use_gpu: bool = False,
+        det_size: Tuple[int, int] = (640, 640),
+        verbose: bool = False,
     ):
         """
-        Initialize the face recognition engine.
+        Initialize the engine. Downloads buffalo_l on first use (handled by
+        InsightFace into ~/.insightface/models).
 
         Args:
-            model_name: InsightFace model to use ('buffalo_l' is ArcFace R100)
-            providers: ONNX Runtime providers (auto-detect if None)
-            use_gpu: Attempt to use GPU if available
-            verbose: Enable verbose logging
+            model_name: InsightFace model pack ('buffalo_l' = SCRFD + ArcFace R100)
+            use_gpu: Use CUDA if onnxruntime exposes it. Default False (local CPU).
+            det_size: Detector input size.
+            verbose: Enable debug logging.
 
         Raises:
-            RuntimeError: If model fails to initialize
+            RuntimeError: if model initialization fails.
         """
         self.model_name = model_name
         self.use_gpu = use_gpu
+        self.det_size = det_size
         self.verbose = verbose
+        self._is_initialized = False
 
         if verbose:
             logger.setLevel(logging.DEBUG)
 
         try:
-            # Auto-detect providers if not specified
-            if providers is None:
-                providers = self._get_optimal_providers()
+            providers = self._get_optimal_providers(use_gpu)
+            logger.info("Initializing FaceEngine with model '%s'", model_name)
+            logger.info("ONNX Runtime providers: %s", providers)
 
-            logger.info(f"Initializing FaceEngine with model: {model_name}")
-            logger.info(f"Using providers: {providers}")
-
-            # Initialize InsightFace with specified model
             self.face_analysis = FaceAnalysis(
                 name=model_name,
                 providers=providers,
-                allowed_modules=['detection', 'recognition']
+                allowed_modules=["detection", "recognition"],
             )
-            self.face_analysis.prepare(ctx_id=0 if use_gpu else -1, det_size=(640, 640))
+            ctx_id = 0 if use_gpu else -1
+            self.face_analysis.prepare(ctx_id=ctx_id, det_size=det_size)
 
-            logger.info("FaceEngine initialized successfully")
             self._is_initialized = True
+            logger.info("FaceEngine initialized successfully (ctx_id=%d)", ctx_id)
 
         except Exception as e:
-            logger.error(f"Failed to initialize FaceEngine: {str(e)}")
+            logger.error("Failed to initialize FaceEngine: %s", e)
             logger.error(traceback.format_exc())
             self._is_initialized = False
-            raise RuntimeError(f"FaceEngine initialization failed: {str(e)}")
+            raise RuntimeError(f"FaceEngine initialization failed: {e}")
 
     @staticmethod
-    def _get_optimal_providers() -> List[str]:
+    def _get_optimal_providers(use_gpu: bool) -> List[str]:
         """
-        Auto-detect optimal ONNX Runtime providers.
+        Build the ONNX Runtime provider list.
 
-        Returns:
-            List of provider names in priority order
+        Only includes CUDAExecutionProvider when use_gpu is requested AND
+        onnxruntime actually reports it as available. CPUExecutionProvider is
+        always included as the fallback. This avoids "provider not found" noise
+        on CPU-only installs.
         """
-        providers = []
-        try:
-            # Try CUDA first (GPU acceleration)
-            providers.append('CUDAExecutionProvider')
-        except Exception:
-            pass
+        providers: List[str] = []
+        if use_gpu:
+            try:
+                import onnxruntime as ort
 
-        try:
-            # Try TensorRT (NVIDIA GPU optimization)
-            providers.append('TensorrtExecutionProvider')
-        except Exception:
-            pass
-
-        # Always include CPU as fallback
-        providers.append('CPUExecutionProvider')
-
+                available = set(ort.get_available_providers())
+                for p in ("CUDAExecutionProvider", "TensorrtExecutionProvider"):
+                    if p in available:
+                        providers.append(p)
+            except Exception:
+                # onnxruntime unavailable or query failed -> CPU only
+                pass
+        providers.append("CPUExecutionProvider")
         return providers
 
     def is_valid_image_path(self, image_path: Union[str, Path]) -> bool:
-        """
-        Validate if file is a supported image format.
-
-        Args:
-            image_path: Path to image file
-
-        Returns:
-            True if file is a supported image format
-        """
-        image_path = Path(image_path)
-        return image_path.suffix.lower() in self.SUPPORTED_FORMATS
+        """True if the file extension is a supported image format."""
+        return Path(image_path).suffix.lower() in self.SUPPORTED_FORMATS
 
     def extract_faces(
         self,
         image_path: Union[str, Path],
-        return_embeddings: bool = True,
         min_confidence: float = MIN_DETECTION_CONFIDENCE,
     ) -> FaceExtractionResult:
         """
-        Extract all faces from a single image.
+        Detect faces and compute 512-d L2-normalized embeddings for one image.
+
+        ALWAYS returns a FaceExtractionResult (never a list). Inspect .status and
+        iterate .faces.
 
         Args:
-            image_path: Path to input image file
-            return_embeddings: Whether to compute face embeddings
-            min_confidence: Minimum detection confidence threshold (0-1)
+            image_path: path to the image file.
+            min_confidence: minimum detection confidence to keep a face.
 
         Returns:
-            FaceExtractionResult with detected faces and embeddings
-
-        Example:
-            >>> engine = FaceEngine()
-            >>> result = engine.extract_faces("photo.jpg")
-            >>> print(f"Found {result.num_faces} faces")
-            >>> for face in result.faces:
-            ...     print(f"Confidence: {face.confidence:.2%}")
+            FaceExtractionResult
         """
         import time
-        import cv2
 
-        start_time = time.time()
-
-        # Validate file path
+        cv2 = self._cv2()
+        start = time.time()
         image_path = Path(image_path)
+
         if not image_path.exists():
-            logger.error(f"Image file not found: {image_path}")
+            logger.error("Image file not found: %s", image_path)
             return FaceExtractionResult(
                 status=FaceDetectionStatus.INVALID_IMAGE,
                 faces=[],
                 num_faces=0,
                 image_shape=None,
                 error_message=f"Image file not found: {image_path}",
-                processing_time_ms=0.0
+                processing_time_ms=0.0,
             )
 
         if not self.is_valid_image_path(image_path):
-            logger.warning(f"Unsupported image format: {image_path.suffix}")
+            logger.warning("Unsupported image format: %s", image_path.suffix)
             return FaceExtractionResult(
                 status=FaceDetectionStatus.INVALID_IMAGE,
                 faces=[],
                 num_faces=0,
                 image_shape=None,
                 error_message=f"Unsupported image format: {image_path.suffix}",
-                processing_time_ms=0.0
+                processing_time_ms=0.0,
             )
 
         try:
-            # Load image using OpenCV
+            # Load as BGR (OpenCV default). InsightFace expects BGR ndarray, so
+            # do NOT convert to RGB here.
             image = cv2.imread(str(image_path))
-
             if image is None:
-                logger.error(f"Failed to load image: {image_path}")
+                logger.error("Failed to decode image: %s", image_path)
                 return FaceExtractionResult(
                     status=FaceDetectionStatus.INVALID_IMAGE,
                     faces=[],
                     num_faces=0,
                     image_shape=None,
-                    error_message=f"Failed to load image: {image_path}",
-                    processing_time_ms=(time.time() - start_time) * 1000
+                    error_message=f"Failed to decode image: {image_path}",
+                    processing_time_ms=(time.time() - start) * 1000,
                 )
 
-            # Convert BGR to RGB for InsightFace
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            image_shape = image_rgb.shape
+            image_shape = tuple(image.shape)  # (h, w, c)
 
-            # Detect faces
-            detected_faces = self.face_analysis.get(image_rgb)
+            detections = self.face_analysis.get(image)  # raw BGR
 
-            if not detected_faces:
-                logger.info(f"No faces detected in {image_path}")
+            if not detections:
                 return FaceExtractionResult(
                     status=FaceDetectionStatus.NO_FACES_DETECTED,
                     faces=[],
                     num_faces=0,
                     image_shape=image_shape,
                     error_message="No faces detected in image",
-                    processing_time_ms=(time.time() - start_time) * 1000
+                    processing_time_ms=(time.time() - start) * 1000,
                 )
 
-            # Process detected faces
-            faces = []
-            for detection in detected_faces:
-                # Extract bounding box
-                bbox_array = detection.bbox
+            faces: List[Face] = []
+            for det in detections:
+                bbox_arr = det.bbox
                 bbox = BoundingBox(
-                    x1=float(bbox_array[0]),
-                    y1=float(bbox_array[1]),
-                    x2=float(bbox_array[2]),
-                    y2=float(bbox_array[3])
+                    x1=float(bbox_arr[0]),
+                    y1=float(bbox_arr[1]),
+                    x2=float(bbox_arr[2]),
+                    y2=float(bbox_arr[3]),
                 )
 
-                # Extract confidence
-                confidence = float(detection.det_score)
-
-                # Filter by confidence threshold
+                confidence = float(getattr(det, "det_score", 0.0))
                 if confidence < min_confidence:
-                    logger.debug(f"Skipping face with low confidence: {confidence:.2%}")
+                    logger.debug("Drop face: low confidence %.3f", confidence)
                     continue
-
-                # Filter by minimum size
                 if bbox.area() < (self.MIN_FACE_SIZE ** 2):
-                    logger.debug(f"Skipping small face: {bbox.width():.0f}x{bbox.height():.0f}px")
+                    logger.debug(
+                        "Drop face: too small %.0fx%.0f", bbox.width(), bbox.height()
+                    )
                     continue
 
-                # Extract embedding if requested
-                embedding = None
-                if return_embeddings and hasattr(detection, 'embedding'):
-                    embedding = np.array(detection.embedding, dtype=np.float32)
-                    # Ensure embedding is normalized to unit sphere
-                    embedding = embedding / np.linalg.norm(embedding)
+                # Embedding: 512-d, float32, L2-normalized (guard norm==0 -> NaN).
+                raw = getattr(det, "embedding", None)
+                if raw is None:
+                    logger.debug("Drop face: no embedding from recognizer")
+                    continue
+                embedding = np.asarray(raw, dtype=np.float32).reshape(-1)
+                norm = float(np.linalg.norm(embedding))
+                embedding = embedding / (norm if norm > 0 else 1.0)
 
-                # Extract landmarks if available
-                landmarks = None
-                if hasattr(detection, 'landmark_2d_106'):
-                    landmarks = np.array(detection.landmark_2d_106)
+                # 5-point keypoints from detection.kps (buffalo_l reliably has these).
+                kps = getattr(det, "kps", None)
+                landmarks = np.asarray(kps, dtype=np.float32) if kps is not None else None
 
-                face = Face(
-                    embedding=embedding,
-                    bounding_box=bbox,
-                    confidence=confidence,
-                    landmarks=landmarks
+                faces.append(
+                    Face(
+                        embedding=embedding,
+                        bounding_box=bbox,
+                        confidence=confidence,
+                        landmarks=landmarks,
+                    )
                 )
-                faces.append(face)
 
-            processing_time = (time.time() - start_time) * 1000
+            elapsed = (time.time() - start) * 1000
 
             if faces:
-                logger.info(f"Extracted {len(faces)} faces from {image_path} ({processing_time:.1f}ms)")
+                logger.info(
+                    "Extracted %d face(s) from %s (%.1fms)",
+                    len(faces),
+                    image_path.name,
+                    elapsed,
+                )
                 return FaceExtractionResult(
                     status=FaceDetectionStatus.SUCCESS,
                     faces=faces,
                     num_faces=len(faces),
                     image_shape=image_shape,
                     error_message=None,
-                    processing_time_ms=processing_time
-                )
-            else:
-                logger.warning(f"Detected faces but all filtered out: {image_path}")
-                return FaceExtractionResult(
-                    status=FaceDetectionStatus.POOR_QUALITY,
-                    faces=[],
-                    num_faces=0,
-                    image_shape=image_shape,
-                    error_message="Detected faces but all filtered (low quality/size)",
-                    processing_time_ms=processing_time
+                    processing_time_ms=elapsed,
                 )
 
+            # Detections existed but all were filtered (low conf / small).
+            return FaceExtractionResult(
+                status=FaceDetectionStatus.POOR_QUALITY,
+                faces=[],
+                num_faces=0,
+                image_shape=image_shape,
+                error_message="Detected faces but all filtered (low quality/size)",
+                processing_time_ms=elapsed,
+            )
+
         except Exception as e:
-            logger.error(f"Error extracting faces from {image_path}: {str(e)}")
+            logger.error("Error extracting faces from %s: %s", image_path, e)
             logger.error(traceback.format_exc())
             return FaceExtractionResult(
                 status=FaceDetectionStatus.PROCESSING_ERROR,
                 faces=[],
                 num_faces=0,
                 image_shape=None,
-                error_message=f"Processing error: {str(e)}",
-                processing_time_ms=(time.time() - start_time) * 1000
+                error_message=f"Processing error: {e}",
+                processing_time_ms=(time.time() - start) * 1000,
             )
 
-    def get_embeddings(
-        self,
-        image_path: Union[str, Path],
-        normalize: bool = True
-    ) -> np.ndarray:
+    def get_embeddings(self, image_path: Union[str, Path]) -> np.ndarray:
         """
-        Extract face embeddings from image (shorthand for extract_faces).
-
-        Returns only embeddings for found faces. Use extract_faces() for full metadata.
+        Return embeddings for every detected face in the image.
 
         Args:
-            image_path: Path to input image
-            normalize: Whether to normalize embeddings to unit sphere
+            image_path: path to the image.
 
         Returns:
-            Array of shape (num_faces, 512) with embeddings
-
-        Raises:
-            ValueError: If no faces detected
-
-        Example:
-            >>> engine = FaceEngine()
-            >>> embeddings = engine.get_embeddings("photo.jpg")
-            >>> print(embeddings.shape)  # (num_faces, 512)
+            np.ndarray of shape (num_faces, 512), float32, L2-normalized.
+            Empty array of shape (0, 512) if no faces were detected.
         """
-        result = self.extract_faces(image_path, return_embeddings=True)
-
+        result = self.extract_faces(image_path)
         if not result.faces:
-            raise ValueError(f"No faces detected in {image_path}")
-
-        embeddings = np.array([f.embedding for f in result.faces], dtype=np.float32)
-
-        if normalize:
-            # Normalize each embedding to unit sphere
-            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-            embeddings = embeddings / norms
-
-        return embeddings
-
-    def batch_process(
-        self,
-        image_paths: List[Union[str, Path]],
-        skip_errors: bool = True,
-        return_embeddings: bool = True
-    ) -> Dict[str, FaceExtractionResult]:
-        """
-        Extract faces from multiple images in batch.
-
-        Args:
-            image_paths: List of paths to image files
-            skip_errors: If True, continue processing on errors; if False, raise exception
-            return_embeddings: Whether to compute embeddings for each face
-
-        Returns:
-            Dictionary mapping image paths to FaceExtractionResult objects
-
-        Example:
-            >>> engine = FaceEngine()
-            >>> image_list = ["photo1.jpg", "photo2.jpg", "photo3.jpg"]
-            >>> results = engine.batch_process(image_list)
-            >>>
-            >>> for img_path, result in results.items():
-            ...     if result.status == FaceDetectionStatus.SUCCESS:
-            ...         print(f"{img_path}: {result.num_faces} faces found")
-            ...     else:
-            ...         print(f"{img_path}: {result.error_message}")
-        """
-        import time
-
-        start_time = time.time()
-        results = {}
-        successful = 0
-        failed = 0
-        total_faces = 0
-
-        logger.info(f"Starting batch processing of {len(image_paths)} images")
-
-        for idx, image_path in enumerate(image_paths, 1):
-            try:
-                result = self.extract_faces(
-                    image_path,
-                    return_embeddings=return_embeddings
-                )
-                results[str(image_path)] = result
-
-                if result.status == FaceDetectionStatus.SUCCESS:
-                    successful += 1
-                    total_faces += result.num_faces
-                    logger.debug(f"[{idx}/{len(image_paths)}] {image_path}: {result.num_faces} faces")
-                else:
-                    logger.debug(f"[{idx}/{len(image_paths)}] {image_path}: {result.status.value}")
-                    failed += 1
-
-            except Exception as e:
-                failed += 1
-                error_msg = f"Batch processing error: {str(e)}"
-                logger.error(f"[{idx}/{len(image_paths)}] {image_path}: {error_msg}")
-
-                if not skip_errors:
-                    logger.error(traceback.format_exc())
-                    raise
-
-                results[str(image_path)] = FaceExtractionResult(
-                    status=FaceDetectionStatus.PROCESSING_ERROR,
-                    faces=[],
-                    num_faces=0,
-                    image_shape=None,
-                    error_message=error_msg
-                )
-
-        elapsed = (time.time() - start_time)
-        logger.info(
-            f"Batch processing completed: {successful} successful, {failed} failed, "
-            f"{total_faces} total faces extracted ({elapsed:.1f}s)"
+            return np.empty((0, self.EMBEDDING_DIMENSION), dtype=np.float32)
+        return np.stack(
+            [np.asarray(f.embedding, dtype=np.float32) for f in result.faces]
         )
-
-        return results
 
     def compare_embeddings(
         self,
         embedding1: np.ndarray,
         embedding2: np.ndarray,
-        metric: str = "cosine"
+        metric: str = "cosine",
     ) -> float:
         """
-        Compare two face embeddings using specified metric.
+        Compare two embeddings.
 
         Args:
-            embedding1: First face embedding (512-dim)
-            embedding2: Second face embedding (512-dim)
-            metric: Similarity metric ('cosine' or 'euclidean')
+            embedding1, embedding2: 512-d vectors.
+            metric: 'cosine' (inner product of normalized vecs, [-1,1]) or
+                    'euclidean' (L2 distance of normalized vecs).
 
         Returns:
-            Similarity score (0-1 for cosine, 0+ for euclidean)
-
-        Example:
-            >>> face1_embed = engine.get_embeddings("person_a.jpg")[0]
-            >>> face2_embed = engine.get_embeddings("person_b.jpg")[0]
-            >>> similarity = engine.compare_embeddings(face1_embed, face2_embed)
-            >>> print(f"Similarity: {similarity:.2%}")
+            float similarity/distance.
         """
-        # Ensure embeddings are properly normalized
-        e1 = embedding1 / np.linalg.norm(embedding1)
-        e2 = embedding2 / np.linalg.norm(embedding2)
+        e1 = np.asarray(embedding1, dtype=np.float32).reshape(-1)
+        e2 = np.asarray(embedding2, dtype=np.float32).reshape(-1)
+        n1 = float(np.linalg.norm(e1))
+        n2 = float(np.linalg.norm(e2))
+        e1 = e1 / (n1 if n1 > 0 else 1.0)
+        e2 = e2 / (n2 if n2 > 0 else 1.0)
 
         if metric == "cosine":
-            # Cosine similarity: dot product of normalized vectors
             return float(np.dot(e1, e2))
-        elif metric == "euclidean":
-            # Euclidean distance
+        if metric == "euclidean":
             return float(np.linalg.norm(e1 - e2))
-        else:
-            raise ValueError(f"Unknown metric: {metric}")
+        raise ValueError(f"Unknown metric: {metric}")
+
+    @staticmethod
+    def _cv2():
+        """Lazy import of OpenCV so importing this module is cheap and tolerant."""
+        import cv2  # noqa: WPS433
+
+        return cv2
 
     def __repr__(self) -> str:
-        """String representation of FaceEngine."""
         return (
-            f"FaceEngine(model={self.model_name}, "
-            f"initialized={self._is_initialized}, "
-            f"use_gpu={self.use_gpu})"
+            f"FaceEngine(model={self.model_name!r}, "
+            f"initialized={self._is_initialized}, use_gpu={self.use_gpu})"
         )
 
 
 if __name__ == "__main__":
-    # Example usage and testing
-    print("Face Recognition Engine - Example Usage")
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="FaceEngine smoke test: verify a single image yields a "
+        "512-d L2-normalized embedding."
+    )
+    parser.add_argument("image", nargs="?", help="Path to a test image with a face")
+    parser.add_argument("--gpu", action="store_true", help="Attempt GPU (default CPU)")
+    args = parser.parse_args()
+
+    print("Omnividence FaceEngine")
     print("=" * 50)
+    engine = FaceEngine(use_gpu=args.gpu, verbose=True)
+    print(f"Initialized: {engine}")
 
-    try:
-        # Initialize engine
-        engine = FaceEngine(use_gpu=True, verbose=True)
-        print(f"Initialized: {engine}")
+    if not args.image:
+        print("\nNo image provided. Pass an image path to run the embedding check:")
+        print("  python face_engine.py /path/to/face.jpg")
+        raise SystemExit(0)
 
-        # Example of extracting faces (requires valid image)
-        print("\nExample: To use this engine:")
-        print("""
-        # Single image
-        result = engine.extract_faces("photo.jpg")
-        print(f"Found {result.num_faces} faces")
-
-        # Get embeddings
-        embeddings = engine.get_embeddings("photo.jpg")
-        print(f"Embeddings shape: {embeddings.shape}")
-
-        # Batch processing
-        results = engine.batch_process(["photo1.jpg", "photo2.jpg"])
-
-        # Compare faces
-        if result.num_faces >= 2:
-            sim = engine.compare_embeddings(
-                result.faces[0].embedding,
-                result.faces[1].embedding
-            )
-            print(f"Similarity: {sim:.2%}")
-        """)
-
-    except Exception as e:
-        print(f"Error: {e}")
-        print("\nMake sure insightface is installed:")
-        print("  pip install insightface onnxruntime")
+    result = engine.extract_faces(args.image)
+    print(f"\nStatus: {result.status.value}")
+    print(f"Faces found: {result.num_faces}")
+    if result.faces:
+        emb = result.faces[0].embedding
+        norm = float(np.linalg.norm(emb))
+        print(f"Embedding shape: {emb.shape}  dtype: {emb.dtype}")
+        print(f"Embedding L2 norm: {norm:.6f}  (expected ~1.0)")
+        ok = emb.shape == (512,) and emb.dtype == np.float32 and abs(norm - 1.0) < 1e-3
+        print("CHECK:", "PASS" if ok else "FAIL")
+    else:
+        print(f"No usable face: {result.error_message}")

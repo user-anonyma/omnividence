@@ -16,7 +16,7 @@
 - Multi-source reverse image search (Google, TinEye, Bing, Yandex)
 - Source filtering and attribution
 - Batch image processing
-- Docker containerization
+- Local install (Python venv + npm)
 - Semantic versioning and easy installation
 
 ### Installation

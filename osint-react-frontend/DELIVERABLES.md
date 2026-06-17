@@ -402,7 +402,7 @@ Dependencies and npm scripts:
 - API backend configuration
 - Troubleshooting guide
 - IDE configuration
-- Deployment options (Vercel, Netlify, Docker)
+- Deployment options (Vercel, Netlify, static host)
 - Performance optimization
 - Security checklist
 - Maintenance guide
@@ -497,7 +497,6 @@ npm run build
 - Vercel
 - Netlify
 - Static hosting
-- Docker containerization
 
 ## Key Features Summary
 

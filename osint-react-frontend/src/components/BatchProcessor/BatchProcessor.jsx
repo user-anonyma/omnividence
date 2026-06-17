@@ -143,8 +143,9 @@ export const BatchProcessor = ({ onBatchSuccess, onBatchError, onLoading }) => {
       const response = await apiClient.uploadBatch(files);
 
       if (response.success && response.data) {
+        const processed = response.data.processed ?? response.data.total_images ?? files.length;
         setSuccessMessage(
-          `Successfully uploaded ${response.data.uploaded_count} image(s)`
+          `Successfully processed ${processed} image(s)`
         );
         onBatchSuccess?.(response.data);
         clearAll();
