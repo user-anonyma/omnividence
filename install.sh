@@ -43,7 +43,7 @@ echo "npm:     $(npm --version)"
 echo ""
 
 # --- Backend: Python venv + pip ----------------------------------------------
-echo "[1/3] Backend: creating venv and installing requirements..."
+echo "[1/4] Backend: creating venv and installing requirements..."
 if [ ! -d "backend/.venv" ]; then
   python3 -m venv backend/.venv
 fi
@@ -51,21 +51,27 @@ fi
 source backend/.venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r backend/requirements.txt
-deactivate
 echo "      backend dependencies installed (backend/.venv)"
 echo ""
 
+# --- Browser engine for the providers (Scrapling manages it) -----------------
+echo "[2/4] Installing Scrapling's browser engine (one-time download)..."
+scrapling install || python -m scrapling install || \
+  echo "      WARN: 'scrapling install' failed; run it manually inside backend/.venv"
+deactivate
+echo ""
+
 # --- Frontend: npm ------------------------------------------------------------
-echo "[2/3] Frontend: installing npm packages..."
+echo "[3/4] Frontend: installing npm packages..."
 ( cd frontend && npm install )
 echo "      frontend dependencies installed"
 echo ""
 
 # --- Env files ----------------------------------------------------------------
-echo "[3/3] Env files..."
+echo "[4/4] Env files..."
 if [ -f ".env.example" ] && [ ! -f ".env" ]; then
   cp .env.example .env
-  echo "      created .env from .env.example (set SERPAPI_KEY to enable providers)"
+  echo "      created .env from .env.example"
 else
   echo "      .env already present (or no .env.example) — left untouched"
 fi
@@ -88,5 +94,6 @@ echo "               -> http://localhost:3000"
 echo ""
 echo "Then open http://localhost:3000 in your browser."
 echo ""
-echo "No SERPAPI_KEY? It still runs: every provider reports 'not configured',"
-echo "results come back empty, and the pipeline reports that honestly."
+echo "Providers (Yandex / Bing / Google Lens) work out of the box via Scrapling's"
+echo "browser — no API key. If an engine throws a CAPTCHA/anti-bot wall, that"
+echo "provider is skipped and reported honestly; the others still return results."

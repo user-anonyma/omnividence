@@ -19,8 +19,9 @@ Omnividence is a **school tech-showcase prototype for face-similarity search**,
 
 1. Detects the **largest** visible face, crops + normalizes it, and embeds it to
    a 512-d L2-normalized vector (the "query face").
-2. Sends the **cropped face JPEG** to reverse-image-search providers (SerpApi:
-   Google Lens, Yandex Images, Bing Images).
+2. Sends the **cropped face JPEG** to reverse-image-search providers by driving
+   their real public pages with Scrapling's browser (Yandex, Bing, Google Lens) —
+   no API key.
 3. Downloads each public result thumbnail, re-detects + embeds the largest face
    in it, and computes cosine similarity to the query face.
 4. Maps cosine to a **0–100 face similarity score**, dedups by image URL, ranks,
@@ -45,10 +46,11 @@ omnividence/
 │   │   └── forensics.py             # experimental, wrapped, off the search path
 │   ├── providers/
 │   │   ├── base.py                  # Provider ABC + ProviderResult/ProviderPage TypedDicts
-│   │   ├── __init__.py              # get_providers(api_key) registry
-│   │   ├── google_lens.py           # SerpApi engine=google_lens (MVP)
-│   │   ├── yandex.py                # SerpApi engine=yandex_images
-│   │   └── bing.py                  # SerpApi engine=bing_images
+│   │   ├── _browser.py              # Scrapling DynamicFetcher helper (run_action, looks_blocked)
+│   │   ├── __init__.py              # get_providers() registry
+│   │   ├── yandex.py                # browser scrape of Yandex Images (most reliable)
+│   │   ├── bing.py                  # browser scrape of Bing Visual Search
+│   │   └── google_lens.py           # browser scrape of Google Lens (most bot-hostile)
 │   ├── services/
 │   │   ├── face.py                  # InsightFace buffalo_l: detect largest, crop, embed 512-d L2
 │   │   ├── ranking.py               # SCORE_BANDS, cosine, to_score, band_for, rank_and_dedup
@@ -175,16 +177,16 @@ UTC timestamps.
 Every provider subclasses `Provider` (in `providers/base.py`) and implements
 `search(image_path, cursor=None) -> ProviderPage`.
 
-- **Key-gating is mandatory.** If `not self.is_configured()` return
-  `{"results": [], "next_cursor": None, "note": "<name>: provider not
-  configured (set SERPAPI_KEY)"}`.
-- **On any API/network error**, catch and return
-  `{"results": [], "next_cursor": None, "note": "<name>: <short error>"}` —
+- **Availability-gating.** If `not self.is_configured()` (Scrapling's browser
+  isn't importable) return `_unavailable_page()` — `{"results": [],
+  "next_cursor": None, "note": "<name>: browser automation unavailable ..."}`.
+- **On a CAPTCHA/anti-bot wall**, return `_blocked_page()` — `{"results": [],
+  "next_cursor": None, "note": "<name>: blocked ..."}`. CAPTCHAs are never bypassed.
+- **On any browser/parse error**, catch and return `_error_page(detail)` —
   never raise, never fabricate.
-- On success, parse `results` from the SerpApi response; set `next_cursor` from
-  the engine's pagination (`google_lens` → page token; `yandex_images` /
-  `bing_images` → integer `page`/`first` offset encoded as JSON like
-  `{"page": 2}`) or `None` when there are no further pages.
+- On success, scrape up to 20 (`RESULT_LIMIT`) public hits from the results page
+  via the provider's `_EXTRACT_JS`. One page per provider for the demo, so
+  `next_cursor` is always `None` (no pagination / mass scraping).
 
 `get_providers(api_key)` returns
 `[GoogleLensProvider, YandexProvider, BingProvider]`. The route persists each
@@ -202,8 +204,9 @@ and that is reported honestly (empty/not-configured notes).
 
 ## 7. Honesty / safety rules (HARD — enforced in code + UI)
 
-1. **Never fabricate results.** No `SERPAPI_KEY` ⇒ every provider returns `[]` +
-   a "provider not configured" note; the route still runs the full pipeline and
+1. **Never fabricate results.** A blocked/unavailable provider returns `[]` +
+   an honest note ("blocked" / "browser automation unavailable"); the route still
+   runs the full pipeline and
    reports the empty/not-configured state honestly.
 2. **No identity claims, never name people** — only public URLs returned by
    providers.
@@ -241,9 +244,9 @@ cd frontend && npm run dev                                          # :3000
 ```
 
 `buffalo_l` downloads into `backend/data/models` on first run (one-time).
-Set `SERPAPI_KEY` in `./.env` for live results; without it the app runs and
-reports providers as not configured. `GET /health` shows
-`{status, version, model_loaded, providers_configured}`.
+Providers need no key — run `scrapling install` once to fetch the browser. If an
+engine is CAPTCHA-walled it's skipped and reported; the others still return
+results. `GET /health` shows `{status, version, model_loaded, providers_configured}`.
 
 ---
 

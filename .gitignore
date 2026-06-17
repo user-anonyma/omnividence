@@ -89,3 +89,6 @@ htmlcov/
 # Misc
 *.bak
 *.tmp
+
+# Test fixtures / scratch (not part of the app)
+sample_images/

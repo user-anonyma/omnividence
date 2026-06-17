@@ -16,7 +16,13 @@ Pillow>=10.0                   # JPEG encode for crops + forensics heuristics
 # --- Optional vector index (not required; brute-force cosine is the default path) ---
 # faiss-cpu>=1.7  ; uncomment if you want ANN over large result sets
 
-# --- HTTP / providers ---
-# httpx is the actual HTTP client used by the providers (SerpApi calls) and the
-# thumbnail downloader in services/cache.py. It MUST be installed.
-httpx>=0.27,<1.0               # SerpApi calls + thumbnail downloads
+# --- HTTP / thumbnail downloads ---
+# httpx is the HTTP client used by the thumbnail downloader in services/cache.py.
+httpx>=0.27,<1.0               # thumbnail downloads
+
+# --- Reverse-image-search providers (browser automation, NOT an API key) ---
+# Scrapling drives the real public Yandex / Bing / Google Lens reverse-image
+# pages with a hardened, stealthy browser (it manages its own engine — we do NOT
+# depend on standalone Playwright). After `pip install`, run `scrapling install`
+# once to fetch the browser binaries.
+scrapling[fetchers]>=0.4.9,<0.5

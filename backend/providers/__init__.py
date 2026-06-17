@@ -4,13 +4,13 @@ backend/providers/__init__.py
 Provider registry for Omnividence reverse-image-search.
 
 Exposes :func:`get_providers`, the single place the route obtains the ordered
-list of providers. Every provider shares the same SerpApi key (``SERPAPI_KEY``)
-and the same :class:`~backend.providers.base.Provider` interface. Un-configured
-providers (no key) cleanly return ``[]`` plus an honest "provider not configured"
-note — they are never silently dropped, so the route can report their state.
+list of providers. Providers drive the REAL public reverse-image pages with a
+headless Chromium (Playwright) — no API keys. A provider that can't run (browser
+unavailable / blocked by CAPTCHA / no hits) cleanly returns ``[]`` plus an honest
+note; it is never silently dropped, so the route can report its state.
 
-Order matters (MVP enables google_lens first):
-    [GoogleLensProvider, YandexProvider, BingProvider]
+Order (MVP enables the most automation-tolerant engine first):
+    [YandexProvider, BingProvider, GoogleLensProvider]
 """
 
 from __future__ import annotations
@@ -22,31 +22,32 @@ from .bing import BingProvider
 from .google_lens import GoogleLensProvider
 from .yandex import YandexProvider
 
-# Provider classes in route order (MVP: google_lens first). The route may select
-# a subset by .name (e.g. ["google_lens", "yandex", "bing"]).
+# Provider classes in route order. Yandex is the most reliable for faces; Google
+# Lens is the most bot-hostile, so it goes last.
 PROVIDER_CLASSES: list[type[Provider]] = [
-    GoogleLensProvider,
     YandexProvider,
     BingProvider,
+    GoogleLensProvider,
 ]
 
 # Convenience: the canonical provider names in order.
 PROVIDER_NAMES: list[str] = [cls.name for cls in PROVIDER_CLASSES]
 
 
-def get_providers(api_key: Optional[str]) -> list[Provider]:
-    """Instantiate every provider with the shared SerpApi key, in route order.
+def get_providers(api_key: Optional[str] = None) -> list[Provider]:
+    """Instantiate every provider in route order.
 
-    Returns ``[GoogleLensProvider(api_key), YandexProvider(api_key),
-    BingProvider(api_key)]``. The route calls ``.search`` on each; un-configured
-    ones cleanly return ``[]`` + a note (they are NOT filtered out here so the
-    route can honestly surface the not-configured state).
+    These are browser-automation providers and take no API key; the optional
+    ``api_key`` arg is accepted (and ignored) only so existing call sites stay
+    stable. The route calls ``.search`` on each; providers that can't run cleanly
+    return ``[]`` + a note (they are NOT filtered out here so the route can
+    honestly surface the unavailable/blocked state).
     """
-    return [cls(api_key) for cls in PROVIDER_CLASSES]
+    return [cls() for cls in PROVIDER_CLASSES]
 
 
 def get_providers_by_name(
-    api_key: Optional[str], names: Optional[list[str]] = None
+    api_key: Optional[str] = None, names: Optional[list[str]] = None
 ) -> list[Provider]:
     """Like :func:`get_providers` but optionally filtered to a subset of names.
 
@@ -54,7 +55,7 @@ def get_providers_by_name(
     ignored. Order follows :data:`PROVIDER_CLASSES`, not the order in ``names``,
     so results stay deterministic regardless of how the caller listed them.
     """
-    providers = get_providers(api_key)
+    providers = get_providers()
     if not names:
         return providers
     wanted = {n.strip() for n in names if n and n.strip()}

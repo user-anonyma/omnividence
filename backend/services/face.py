@@ -60,6 +60,11 @@ _model = None  # type: ignore[var-annotated]
 _model_lock = threading.Lock()
 _MODEL_NAME = "buffalo_l"
 _DET_SIZE = (640, 640)
+# SCRFD detection confidence floor. InsightFace defaults to 0.5, which can just
+# miss otherwise-clear faces (e.g. some synthetic/GAN portraits score ~0.4). A
+# slightly lower floor makes the demo reliably pick up a clearly-visible
+# uploaded face while still rejecting non-faces.
+_DET_THRESH = 0.4
 
 
 def is_loaded() -> bool:
@@ -95,8 +100,9 @@ def init_model() -> None:
             root=_INSIGHTFACE_ROOT,
             providers=["CPUExecutionProvider"],
         )
-        # ctx_id=-1 -> CPU. det_size keeps detection deterministic across inputs.
-        app.prepare(ctx_id=-1, det_size=_DET_SIZE)
+        # ctx_id=-1 -> CPU. det_size keeps detection deterministic across inputs;
+        # det_thresh lowered slightly so clearly-visible faces aren't missed.
+        app.prepare(ctx_id=-1, det_size=_DET_SIZE, det_thresh=_DET_THRESH)
         _model = app
 
 

@@ -11,9 +11,10 @@ School FACE-SIMILARITY SEARCH demo (NOT identity / surveillance). This module:
   * exposes /health and /version,
   * binds 127.0.0.1:8000 when run directly. Local-only, no Docker.
 
-HONESTY: with no SERPAPI_KEY configured the providers report "not configured"
-and the pipeline still runs and reports honestly. Scores are always a
-"face similarity score" (0-100), never a match/identity probability.
+HONESTY: providers drive real public pages via Scrapling's browser (no API key).
+If one is blocked by a CAPTCHA/anti-bot wall it reports "blocked" and the
+pipeline still runs and reports honestly. Scores are always a "face similarity
+score" (0-100), never a match/identity probability.
 """
 
 from __future__ import annotations
@@ -110,19 +111,16 @@ app.mount(
 
 # --- health / version ---------------------------------------------------------
 def _providers_configured() -> list[str]:
-    """Names of providers that have a usable key. Empty when SERPAPI_KEY unset.
+    """Names of providers that can run (Scrapling's browser is available).
 
     Imported lazily and guarded so /health stays up even mid-build.
     """
     try:
         from providers import get_providers
 
-        return [p.name for p in get_providers(config.SERPAPI_KEY) if p.is_configured()]
+        return [p.name for p in get_providers() if p.is_configured()]
     except Exception:
-        # Fallback: if the key is present, all three engines are reachable.
-        return (
-            ["google_lens", "yandex", "bing"] if config.SERPAPI_KEY else []
-        )
+        return []
 
 
 def _model_loaded() -> bool:

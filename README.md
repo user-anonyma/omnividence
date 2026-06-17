@@ -22,8 +22,9 @@ It **does**:
 
 - Detect the single largest face in your upload and crop/normalize it.
 - Embed faces to 512-d, L2-normalized vectors (InsightFace `buffalo_l`, CPU).
-- Query reverse-image-search providers via SerpApi: **Google Lens**, **Yandex
-  Images**, **Bing Images** — returning only the public URLs those engines give.
+- Query reverse-image-search providers by driving their real public pages with a
+  browser (Scrapling): **Yandex**, **Bing Visual Search**, **Google Lens** —
+  returning only the public URLs those engines surface.
 - Re-rank results locally by cosine similarity between your face and the face in
   each result, mapped to a 0–100 **face similarity score** with labeled bands.
 - Persist each search to SQLite, cache thumbnails on disk, and support
@@ -33,9 +34,9 @@ It **does not**, by design:
 
 - Name people or make any identity claim. Results are public URLs only.
 - Scrape private social media or build a private face index.
-- Fabricate results. **With no `SERPAPI_KEY`, every provider returns `[]` plus a
-  "provider not configured" note, and the pipeline still runs and reports the
-  empty/not-configured state honestly.**
+- Fabricate results. **If an engine throws a CAPTCHA/anti-bot wall, that provider
+  returns `[]` plus a "blocked" note and is skipped; the others still return
+  results. CAPTCHAs are never bypassed and results are never invented.**
 - Label anything as a "match", "identity", or "probability" — only "similarity".
 
 An **experimental forensics panel** (AI-generated / manipulation-ELA / deepfake
@@ -51,7 +52,8 @@ not evidence, and is wrapped so it can never block or fail the search path.
 - **Backend:** FastAPI + Uvicorn, on `127.0.0.1:8000`.
 - **Face detection / embedding:** InsightFace `buffalo_l` on CPU
   (`CPUExecutionProvider`), 512-d float32 L2-normalized embeddings.
-- **Providers:** SerpApi engines `google_lens`, `yandex_images`, `bing_images`.
+- **Providers:** Scrapling browser automation of the public Yandex / Bing /
+  Google Lens reverse-image pages (no API key).
 - **Storage:** SQLite (WAL) + an on-disk thumbnail cache.
 - **Deployment:** local install only. **There is no Docker** — no Dockerfile, no
   compose. A Python venv + npm is the whole setup.
@@ -69,8 +71,8 @@ InsightFace buffalo_l ── detect LARGEST face ── crop + normalize ── 
    │                                                   └── cropped face JPEG  ──┐
    ▼                                                                            │
 no face?  ── 422 no_face_detected                                               ▼
-                                                              SerpApi reverse-image-search
-                                                       (google_lens / yandex_images / bing_images)
+                                                         browser reverse-image-search (Scrapling)
+                                                          (Yandex / Bing / Google Lens, no key)
                                                                                 │
                                               public results (image_url, thumbnail_url, page_url, page_title, provider)
                                                                                 │
@@ -138,30 +140,23 @@ npm run dev
 
 Open **http://localhost:3000** and upload a face photo.
 
-### Enabling providers (optional)
+### Providers
 
-Without a key the app runs and honestly reports every provider as "not
-configured" (empty results). To get real results, set one SerpApi key — it is
-shared by all three engines:
-
-```bash
-# in ./.env  (backend reads this; it is NEVER exposed to the browser)
-SERPAPI_KEY=your_serpapi_key_here
-```
-
-Restart the backend after setting it. `GET /health` lists which providers are
-configured.
+No API key is needed — the providers drive the real public Yandex / Bing /
+Google Lens pages with Scrapling's browser. **Yandex** is the most reliable for
+faces (it surfaces the same person well); **Bing** adds visually-similar volume;
+**Google Lens** is the most bot-hostile and is often CAPTCHA-walled. If an engine
+is blocked it's skipped and reported honestly; the others still return results.
+`GET /health` lists which providers can run. CAPTCHAs are never bypassed.
 
 ---
 
 ## Configuration
 
-Backend env vars (all optional except `SERPAPI_KEY` for live results). See
-`.env.example`:
+Backend env vars (all optional). See `.env.example`:
 
 | Variable                     | Default                           | Purpose                                                            |
 |------------------------------|-----------------------------------|-------------------------------------------------------------------|
-| `SERPAPI_KEY`                | *(empty)*                         | SerpApi key for all three engines. Empty ⇒ providers "not configured". Backend-only. |
 | `OMNI_DATA_DIR`              | `./backend/data`                  | Base data dir (DB, thumbs, models). Created on startup.            |
 | `OMNI_DB_PATH`               | `${OMNI_DATA_DIR}/omnividence.db` | SQLite file path.                                                 |
 | `OMNI_THUMB_CACHE_DIR`       | `${OMNI_DATA_DIR}/thumbs`         | Thumbnail cache dir (`<sha256(image_url)>.jpg`).                   |
@@ -195,8 +190,8 @@ All search request/response JSON is owned by `backend/api/routes/search.py`.
 Notable response cases (honest by design):
 
 - **No face in upload:** `422 {"error":"no_face_detected", ...}`.
-- **No `SERPAPI_KEY`:** `200` with `results: []`, `providers_used: []`, and a
-  `note` listing each provider as "not configured".
+- **A provider CAPTCHA-walled:** `200`; that provider contributes `results: []`
+  with a `note` of "blocked", and the others still return results.
 - **Bad/oversized upload:** `400 {"error":"invalid_image", ...}`.
 
 ---
@@ -213,10 +208,10 @@ omnividence/
 ├── .env.example         # backend env template
 ├── backend/             # FastAPI app, providers, services, tests
 │   ├── main.py          # app entry: CORS, startup init, routes, /health
-│   ├── config.py        # OMNI_* + SERPAPI_KEY env, paths
+│   ├── config.py        # OMNI_* env, paths
 │   ├── requirements.txt
 │   ├── api/routes/      # search.py (orchestrator), forensics.py (experimental)
-│   ├── providers/       # base.py ABC + google_lens / yandex / bing
+│   ├── providers/       # base.py ABC + _browser.py (Scrapling) + yandex / bing / google_lens
 │   ├── services/        # face.py, ranking.py, cache.py, detection.py (forensics heuristics)
 │   └── data/            # gitignored: omnividence.db, thumbs/, models/
 └── frontend/            # Next.js 14 app router (JS/JSX, JSDoc-typed)

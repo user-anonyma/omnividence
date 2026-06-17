@@ -19,8 +19,9 @@ Routes:
     GET  /api/search/{search_id}/query-face
 
 Honesty/safety guarantees enforced here:
-  * Never fabricates results. With no SERPAPI_KEY every provider returns [] plus a
-    "provider not configured" note; the pipeline still runs and reports honestly.
+  * Never fabricates results. A provider that can't run (browser unavailable,
+    blocked by a CAPTCHA/anti-bot wall, or no hits) returns [] plus an honest
+    note; the pipeline still runs and reports that state truthfully.
   * No identity claims, never names people; only public URLs returned by providers.
   * The score is always a "face similarity score" in [0,100], never a match
     probability / identity confidence.
@@ -40,7 +41,6 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from config import (
     OMNI_MAX_RESULTS_PER_PAGE,
     OMNI_THUMB_CACHE_DIR,
-    SERPAPI_KEY,
 )
 from providers import get_providers
 from services import cache, face, ranking
@@ -58,8 +58,8 @@ KNOWN_PROVIDERS = {"google_lens", "yandex", "bing"}
 # Helpers
 # --------------------------------------------------------------------------- #
 def _providers_configured() -> list[str]:
-    """Provider names that have a usable SERPAPI_KEY (for /health and metadata)."""
-    return [p.name for p in get_providers(SERPAPI_KEY) if p.is_configured()]
+    """Provider names that can run (Playwright available) — for /health/metadata."""
+    return [p.name for p in get_providers() if p.is_configured()]
 
 
 def _parse_requested_providers(providers: Optional[str]) -> Optional[set[str]]:
@@ -206,7 +206,7 @@ def _fan_out_first_page(
     notes: list[str] = []
     batch: list[dict] = []
 
-    for provider in get_providers(SERPAPI_KEY):
+    for provider in get_providers():
         if requested is not None and provider.name not in requested:
             continue
         providers_used.append(provider.name)
@@ -298,7 +298,7 @@ async def post_search(
     # in the searches row).
     planned = [
         p.name
-        for p in get_providers(SERPAPI_KEY)
+        for p in get_providers()
         if requested is None or p.name in requested
     ]
 
@@ -397,7 +397,7 @@ async def get_more(search_id: str = Path(...)):
     notes: list[str] = []
     batch: list[dict] = []
 
-    for provider in get_providers(SERPAPI_KEY):
+    for provider in get_providers():
         state = cursors.get(provider.name)
         if state is None:
             # Provider was never part of this search; skip it.

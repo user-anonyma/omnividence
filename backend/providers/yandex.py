@@ -1,253 +1,117 @@
 """
 backend/providers/yandex.py
 
-Reverse-image-search provider: Yandex Images via SerpApi (engine="yandex_images").
+Yandex reverse-image-search provider (browser automation via Scrapling, no API key).
 
-Pipeline role: given the cropped *query face* JPEG, ask Yandex Images (through
-SerpApi) for visually-similar PUBLIC images and return them as normalized
-``ProviderResult`` dicts. Downstream the route downloads each thumbnail,
-re-embeds the largest face, and scores cosine similarity — this provider only
-surfaces public URLs, never identities, never fabricated hits.
+Flow (see base.Provider): open public Yandex Images, upload the cropped query-face
+JPEG via the "search by image" file input, wait for the CBIR results, and scrape
+up to 20 public hits — the "sites that contain this image" entries (source page
+URL + title + preview thumbnail) plus similar-image previews.
 
-HONESTY / SAFETY (mandatory):
-  * Gated on SERPAPI_KEY. With no key -> [] + "provider not configured" note.
-  * Any API/network/parse error -> [] + short note. Catch, never raise.
-  * Never fabricates results.
-
-SerpApi yandex_images specifics
--------------------------------
-The Yandex reverse-image search needs a publicly fetchable image URL (param
-``url``), not a raw local file upload. The cropped query face lives on local
-disk, so to query Yandex it must be reachable over HTTP. We expose it via the
-optional env var ``OMNI_PUBLIC_BASE_URL``: when set, the backend's
-/api/search/{id}/query-face endpoint (which serves exactly this JPEG) is publicly
-reachable and we hand SerpApi that URL.
-
-If ``OMNI_PUBLIC_BASE_URL`` is NOT set we cannot give Yandex a fetchable image,
-so we return [] with an honest note rather than fabricating — the rest of the
-pipeline still runs and reports the state truthfully.
-
-Pagination: the SerpApi yandex_images engine paginates with an integer ``page``
-(0-based). We encode the NEXT page number into the opaque cursor as JSON
-``{"page": N}``; ``None`` when no further pages exist.
+Honesty/safety: never fabricates; detects CAPTCHA/anti-bot and reports "blocked";
+no proxies, no CAPTCHA bypass, capped at 20. Yandex is the most automation-tolerant
+of the three engines and tends to be the best for faces.
 """
 
 from __future__ import annotations
 
-import json
-import os
-from typing import Optional
-
-import httpx
-
 from .base import Provider, ProviderPage, ProviderResult
+from ._browser import absolutize, dismiss_consent, looks_blocked, run_action, try_upload
 
-SERPAPI_ENDPOINT = "https://serpapi.com/search.json"
-_REQUEST_TIMEOUT_SEC = 20.0
+_UPLOAD_URL = "https://yandex.com/images/"
+_RESULT_SELECTOR = ".CbirSites-Item, a.Thumb, [class*='CbirSites']"
+_FILE_SELECTORS = ("input[type=file]",)
+_REVEAL_SELECTORS = (
+    "button.input__cbir-button",
+    "button[aria-label*='image' i]",
+    ".websearch__cbir-button",
+    ".input__button",
+)
+
+_EXTRACT_JS = r"""
+() => {
+  const out = []; const pushed = new Set();
+  const add = (image_url, thumbnail_url, page_url, page_title) => {
+    if (!image_url || pushed.has(image_url)) return;
+    pushed.add(image_url);
+    out.push({ image_url, thumbnail_url: thumbnail_url || null,
+               page_url: page_url || null, page_title: page_title || null });
+  };
+  // "Sites that contain this image" — real source pages (best signal).
+  document.querySelectorAll('.CbirSites-Item').forEach(item => {
+    const a = item.querySelector('a.CbirSites-ItemTitle, .CbirSites-ItemTitle a, a[href]');
+    const img = item.querySelector('img');
+    const thumb = img ? (img.src || img.getAttribute('data-src')) : null;
+    add(thumb, thumb, a ? a.href : null, a ? (a.textContent || '').trim() : null);
+  });
+  // Similar-image / object thumbnails: anchors with a Thumb class wrapping an img
+  // (each is a Yandex-proxied preview of a matched public image + its source link).
+  document.querySelectorAll("a.Thumb, a[class*='Thumb']").forEach(a => {
+    const img = a.querySelector('img');
+    const thumb = img ? (img.src || img.getAttribute('data-src')) : null;
+    if (!thumb) return;
+    add(thumb, thumb, a.href || null, img.alt ? img.alt.trim() : null);
+  });
+  return out.slice(0, 60);
+}
+"""
 
 
 class YandexProvider(Provider):
     name = "yandex"
-    engine = "yandex_images"
 
-    # ------------------------------------------------------------------ #
-    # cursor (de)serialization — opaque JSON string the route round-trips
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _decode_page(cursor: Optional[str]) -> int:
-        """Return the 0-based page number carried inside the opaque cursor.
-
-        ``None``/unparseable cursor => page 0 (first page).
-        """
-        if not cursor:
-            return 0
-        try:
-            data = json.loads(cursor)
-        except (ValueError, TypeError):
-            return 0
-        if isinstance(data, dict):
-            page = data.get("page")
-            if isinstance(page, int) and page >= 0:
-                return page
-        return 0
-
-    @staticmethod
-    def _encode_page(page: Optional[int]) -> Optional[str]:
-        """Wrap a next-page number into the opaque cursor JSON, or None when exhausted."""
-        if page is None:
-            return None
-        return json.dumps({"page": page})
-
-    # ------------------------------------------------------------------ #
-    # public image URL for the query-face JPEG (required by yandex_images)
-    # ------------------------------------------------------------------ #
-    def _public_image_url(self, image_path: str) -> Optional[str]:
-        """Map the local cropped-face JPEG to a publicly fetchable URL.
-
-        Uses OMNI_PUBLIC_BASE_URL if present. The base may already point at the
-        exact query-face URL (it is per-search), or at the backend root in which
-        case we append the file basename. Returns None if no public base is set.
-        """
-        base = os.environ.get("OMNI_PUBLIC_BASE_URL", "").strip()
-        if not base:
-            return None
-        if base.rstrip("/").endswith("query-face"):
-            return base
-        return base.rstrip("/") + "/" + os.path.basename(image_path)
-
-    # ------------------------------------------------------------------ #
-    # parse a single SerpApi yandex_images hit into a ProviderResult
-    # ------------------------------------------------------------------ #
-    def _parse_hit(self, hit: dict) -> Optional[ProviderResult]:
-        if not isinstance(hit, dict):
-            return None
-        # SerpApi yandex_images "image_results" expose:
-        #   "original_image" {"link": ...} / "original" (full-res image URL),
-        #   "thumbnail" (thumb URL),
-        #   "link" (source page URL), "title" / "source" (page title/site).
-        image_url = (
-            hit.get("original")
-            or hit.get("original_image_url")
-            or hit.get("image")
-        )
-        if not image_url:
-            orig = hit.get("original_image")
-            if isinstance(orig, dict):
-                image_url = orig.get("link") or orig.get("url")
-        if not image_url or not isinstance(image_url, str):
-            # fall back to thumbnail only as a last resort (still a public URL)
-            thumb = hit.get("thumbnail")
-            if isinstance(thumb, str) and thumb:
-                image_url = thumb
-            else:
-                return None  # no usable public image URL -> skip (never fabricate)
-
-        thumbnail_url = hit.get("thumbnail")
-        if not isinstance(thumbnail_url, str):
-            thumbnail_url = None
-
-        page_url = hit.get("link") or hit.get("source_url")
-        if not isinstance(page_url, str):
-            page_url = None
-
-        page_title = hit.get("title") or hit.get("source")
-        if not isinstance(page_title, str):
-            page_title = None
-
-        result: ProviderResult = {
-            "image_url": image_url,
-            "thumbnail_url": thumbnail_url,
-            "page_url": page_url,
-            "page_title": page_title,
-            "provider": self.name,
-        }
-        return result
-
-    @staticmethod
-    def _has_next_page(payload: dict, current_page: int) -> bool:
-        """Decide whether another page exists after ``current_page``.
-
-        Prefer SerpApi's explicit pagination metadata; fall back to "we got a
-        full-looking batch" only when metadata is absent.
-        """
-        pag = payload.get("serpapi_pagination")
-        if isinstance(pag, dict):
-            # SerpApi commonly exposes a ready-made next-page request URL/flag.
-            if pag.get("next") or pag.get("next_page_token"):
-                return True
-            other = pag.get("other_pages")
-            if isinstance(other, dict):
-                # keys are page numbers as strings; if any is > current+1 base
-                for k in other.keys():
-                    try:
-                        if int(k) > current_page + 1:
-                            return True
-                    except (ValueError, TypeError):
-                        continue
-            return False
-        # No metadata: assume there's more only if this page returned results.
-        return False
-
-    # ------------------------------------------------------------------ #
-    # main entry point
-    # ------------------------------------------------------------------ #
-    def search(self, image_path: str, cursor: Optional[str] = None) -> ProviderPage:
-        # KEY-GATING (mandatory) ----------------------------------------
-        if not self.is_configured():
-            return self._not_configured_page()
-
-        # Yandex reverse-image search needs a publicly fetchable image URL.
-        public_url = self._public_image_url(image_path)
-        if not public_url:
-            return self._error_page(
-                "yandex needs a public image URL "
-                "(set OMNI_PUBLIC_BASE_URL so the query face is reachable)"
-            )
-
-        page = self._decode_page(cursor)
-        params = {
-            "engine": self.engine,
-            "url": public_url,
-            "api_key": self.api_key,
-        }
-        if page > 0:
-            params["page"] = page
-
-        # network + parse, all errors degrade to an honest empty page --------
-        try:
-            with httpx.Client(timeout=_REQUEST_TIMEOUT_SEC) as client:
-                resp = client.get(SERPAPI_ENDPOINT, params=params)
-        except httpx.TimeoutException:
-            return self._error_page("request timed out")
-        except httpx.HTTPError as exc:
-            return self._error_page(f"network error ({type(exc).__name__})")
-        except Exception as exc:  # never let the search path break
-            return self._error_page(f"unexpected error ({type(exc).__name__})")
-
-        if resp.status_code == 401:
-            return self._error_page("unauthorized (check SERPAPI_KEY)")
-        if resp.status_code == 429:
-            return self._error_page("rate limited")
-        if resp.status_code >= 400:
-            return self._error_page(f"HTTP {resp.status_code}")
+    def _scrape(self, image_path: str) -> ProviderPage:
+        def action(page, cap):
+            if looks_blocked(page):
+                cap["blocked"] = True
+                return
+            if not try_upload(page, image_path, _FILE_SELECTORS, _REVEAL_SELECTORS):
+                cap["blocked"] = looks_blocked(page)
+                cap["no_upload"] = True
+                return
+            # Results load async behind a cookie banner; dismiss it then wait.
+            page.wait_for_timeout(2000)
+            dismiss_consent(page)
+            try:
+                page.wait_for_selector(_RESULT_SELECTOR, timeout=20000)
+            except Exception:
+                pass
+            # The similar-images grid is lazy-loaded; scroll in steps so more
+            # thumbnails actually fetch their src before we harvest.
+            for _ in range(5):
+                page.mouse.wheel(0, 3500)
+                page.wait_for_timeout(1200)
+            if looks_blocked(page):
+                cap["blocked"] = True
+                return
+            cap["base_url"] = page.url
+            cap["raw"] = page.evaluate(_EXTRACT_JS) or []
 
         try:
-            payload = resp.json()
-        except (ValueError, json.JSONDecodeError):
-            return self._error_page("invalid JSON response")
+            cap = run_action(_UPLOAD_URL, action)
+        except Exception as exc:
+            return self._error_page(f"browser error ({type(exc).__name__})")
 
-        if not isinstance(payload, dict):
-            return self._error_page("unexpected response shape")
+        if cap.get("blocked"):
+            return self._blocked_page()
+        if cap.get("no_upload"):
+            return self._error_page("could not start image search (upload UI changed)")
+        if cap.get("error") and not cap.get("raw"):
+            return self._error_page(f"page error ({cap['error']})")
 
-        # SerpApi reports recoverable problems via an "error" field.
-        api_error = payload.get("error")
-        if isinstance(api_error, str) and api_error:
-            short = api_error if len(api_error) <= 120 else api_error[:117] + "..."
-            return self._error_page(short)
-
-        raw_hits = (
-            payload.get("image_results")
-            or payload.get("images_results")
-            or []
-        )
-        if not isinstance(raw_hits, list):
-            raw_hits = []
-
+        base_url = cap.get("base_url") or _UPLOAD_URL
         results: list[ProviderResult] = []
-        for hit in raw_hits:
-            parsed = self._parse_hit(hit)
-            if parsed is not None:
-                results.append(parsed)
-
-        # Pagination: only advance if there's evidence of a next page AND this
-        # page actually returned something.
-        if results and self._has_next_page(payload, page):
-            next_cursor = self._encode_page(page + 1)
-        else:
-            next_cursor = None
-
-        return {
-            "results": results,
-            "next_cursor": next_cursor,
-            "note": None,  # clean success
-        }
+        for hit in cap.get("raw", []):
+            image_url = absolutize(base_url, hit.get("image_url"))
+            if not image_url:
+                continue
+            results.append(
+                {
+                    "image_url": image_url,
+                    "thumbnail_url": absolutize(base_url, hit.get("thumbnail_url")) or image_url,
+                    "page_url": absolutize(base_url, hit.get("page_url")),
+                    "page_title": hit.get("page_title") or None,
+                    "provider": self.name,
+                }
+            )
+        return self._ok_page(results)

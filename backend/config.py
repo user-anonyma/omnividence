@@ -1,12 +1,12 @@
 """Central configuration for the Omnividence backend.
 
-Reads all OMNI_* environment variables and SERPAPI_KEY, computes the data /
-cache / model paths, and ensures the required directories exist. Import `config`
-anywhere in the backend to read settings; nothing here is mutated at runtime.
+Reads all OMNI_* environment variables, computes the data / cache / model paths,
+and ensures the required directories exist. Import `config` anywhere in the
+backend to read settings; nothing here is mutated at runtime.
 
-SERPAPI_KEY is read here (backend-only) and is NEVER exposed to the frontend.
-With no key, providers report "not configured" and the pipeline still runs
-honestly (empty results) — that gating lives in the provider layer.
+Providers use Scrapling's browser automation (no API key), so there is no secret
+to configure here — a blocked engine just reports "blocked" and the pipeline
+still runs honestly.
 """
 
 from __future__ import annotations
@@ -54,10 +54,8 @@ def _env_int(name: str, default: int) -> int:
 # --- version ------------------------------------------------------------------
 VERSION = _read_version()
 
-# --- provider key (backend-only secret) ---------------------------------------
-# Shared by all three SerpApi engines (google_lens, yandex_images, bing_images).
-# Empty/unset => every provider is "not configured".
-SERPAPI_KEY: str = os.environ.get("SERPAPI_KEY", "").strip()
+# Providers use Scrapling's browser automation (no API key). Nothing to configure
+# here for them — an engine that gets CAPTCHA-walled just reports "blocked".
 
 # --- base data directory ------------------------------------------------------
 # Default ./backend/data resolved relative to this file so it is stable

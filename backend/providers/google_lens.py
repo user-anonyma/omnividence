@@ -1,231 +1,113 @@
 """
 backend/providers/google_lens.py
 
-MVP reverse-image-search provider: Google Lens via SerpApi (engine="google_lens").
+Google Lens reverse-image-search provider (browser automation via Scrapling, no
+API key).
 
-Pipeline role: given the cropped *query face* JPEG, ask Google Lens (through
-SerpApi) for visually-similar PUBLIC images and return them as normalized
-``ProviderResult`` dicts. Downstream the route downloads each thumbnail,
-re-embeds the largest face, and scores cosine similarity — this provider only
-surfaces public URLs, never identities, never fabricated hits.
+Flow (see base.Provider): open the Google Lens upload page, dismiss any cookie/
+consent interstitial, upload the cropped query-face JPEG, wait for visual matches,
+and scrape up to 20 public hits (source page link + preview thumbnail).
 
-HONESTY / SAFETY (mandatory):
-  * Gated on SERPAPI_KEY. With no key -> [] + "provider not configured" note.
-  * Any API/network/parse error -> [] + short note. Catch, never raise.
-  * Never fabricates results.
+Reality check: Google Lens has the most obfuscated DOM and the most aggressive
+anti-bot of the three engines — it frequently shows a consent wall or CAPTCHA to
+automated browsers. When that happens we report "blocked" and return nothing
+rather than trying to bypass it. Yandex/Bing are the more reliable providers.
 
-SerpApi google_lens specifics
------------------------------
-The Google Lens engine searches a PUBLIC image URL (param ``url``), not a raw file
-upload. The cropped query face lives on local disk, so to query Google Lens it
-must be reachable over HTTP. We expose it via the optional env var
-``OMNI_PUBLIC_BASE_URL``: when set, the backend's /api/search/{id}/query-face
-endpoint (which serves exactly this JPEG) is publicly reachable at
-``<OMNI_PUBLIC_BASE_URL>`` and we hand SerpApi that URL.
-
-If ``OMNI_PUBLIC_BASE_URL`` is NOT set we cannot give Google Lens a fetchable
-image, so we return [] with an honest note rather than fabricating — the rest of
-the pipeline still runs and reports the state truthfully.
-
-Pagination: SerpApi google_lens returns a page token at
-``serpapi_pagination.next_page_token`` (sometimes ``next_page_token`` at the
-root). We encode it into the opaque cursor as JSON ``{"page_token": "<tok>"}``;
-``None`` when no further pages exist.
+Honesty/safety: never fabricates; no proxies, no CAPTCHA bypass, capped at 20.
 """
 
 from __future__ import annotations
 
-import json
-import os
-from typing import Optional
-
-import httpx
-
 from .base import Provider, ProviderPage, ProviderResult
+from ._browser import absolutize, looks_blocked, run_action, try_upload
 
-SERPAPI_ENDPOINT = "https://serpapi.com/search.json"
-_REQUEST_TIMEOUT_SEC = 20.0
+_UPLOAD_URL = "https://lens.google.com/upload"
+_FILE_SELECTORS = ("input[type=file]",)
+_REVEAL_SELECTORS = ("[aria-label*='upload' i]", "[aria-label*='image' i]")
+_CONSENT_SELECTORS = (
+    "button[aria-label*='Accept all' i]",
+    "button[aria-label*='Reject all' i]",
+    "button:has-text('Accept all')",
+    "button:has-text('I agree')",
+    "#L2AGLb",
+)
+
+# Result class names are randomized, so scan anchors wrapping an image that point
+# off-site, collecting the preview img + (unwrapped) source link.
+_EXTRACT_JS = r"""
+() => {
+  const out = []; const pushed = new Set();
+  document.querySelectorAll('a[href] img').forEach(node => {
+    const a = node.closest('a[href]'); if (!a) return;
+    let href = a.href || '';
+    try { const u = new URL(href);
+      const real = u.searchParams.get('imgurl') || u.searchParams.get('url') || u.searchParams.get('q');
+      if (real) href = real;
+    } catch (e) {}
+    const img = node.src || node.getAttribute('data-src');
+    if (!img || pushed.has(img)) return;
+    pushed.add(img);
+    const title = (node.alt || a.getAttribute('aria-label') || a.textContent || '').trim();
+    out.push({ image_url: img, thumbnail_url: img, page_url: href, page_title: title || null });
+  });
+  return out.slice(0, 60);
+}
+"""
 
 
 class GoogleLensProvider(Provider):
     name = "google_lens"
-    engine = "google_lens"
 
-    # ------------------------------------------------------------------ #
-    # cursor (de)serialization — opaque JSON string the route round-trips
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _decode_cursor(cursor: Optional[str]) -> Optional[str]:
-        """Return the page_token carried inside the opaque cursor, or None."""
-        if not cursor:
-            return None
-        try:
-            data = json.loads(cursor)
-        except (ValueError, TypeError):
-            # Tolerate a bare token string for robustness.
-            return cursor or None
-        if isinstance(data, dict):
-            tok = data.get("page_token")
-            return tok if isinstance(tok, str) and tok else None
-        return None
-
-    @staticmethod
-    def _encode_cursor(page_token: Optional[str]) -> Optional[str]:
-        """Wrap a page token into the opaque cursor JSON, or None when exhausted."""
-        if not page_token:
-            return None
-        return json.dumps({"page_token": page_token})
-
-    # ------------------------------------------------------------------ #
-    # public image URL for the query-face JPEG (required by google_lens)
-    # ------------------------------------------------------------------ #
-    def _public_image_url(self, image_path: str) -> Optional[str]:
-        """Map the local cropped-face JPEG to a publicly fetchable URL.
-
-        Uses OMNI_PUBLIC_BASE_URL if present. The base may already point at the
-        exact query-face URL (it is per-search), or at the backend root in which
-        case we append the file basename. Returns None if no public base is set.
-        """
-        base = os.environ.get("OMNI_PUBLIC_BASE_URL", "").strip()
-        if not base:
-            return None
-        # If the operator points the base directly at a query-face URL, use it
-        # verbatim; otherwise join the basename of the served JPEG.
-        if base.rstrip("/").endswith("query-face"):
-            return base
-        return base.rstrip("/") + "/" + os.path.basename(image_path)
-
-    # ------------------------------------------------------------------ #
-    # parse a single SerpApi google_lens hit into a ProviderResult
-    # ------------------------------------------------------------------ #
-    def _parse_hit(self, hit: dict) -> Optional[ProviderResult]:
-        if not isinstance(hit, dict):
-            return None
-        # SerpApi google_lens visual matches expose:
-        #   "image" / "thumbnail" (image URLs),
-        #   "link" (source page URL), "title" / "source" (page title/site).
-        image_url = (
-            hit.get("image")
-            or hit.get("original")
-            or hit.get("image_url")
-            or hit.get("thumbnail")
-        )
-        if not image_url or not isinstance(image_url, str):
-            return None  # no usable public image URL -> skip (never fabricate one)
-
-        thumbnail_url = hit.get("thumbnail")
-        if not isinstance(thumbnail_url, str):
-            thumbnail_url = None
-
-        page_url = hit.get("link") or hit.get("source_url")
-        if not isinstance(page_url, str):
-            page_url = None
-
-        page_title = hit.get("title") or hit.get("source")
-        if not isinstance(page_title, str):
-            page_title = None
-
-        result: ProviderResult = {
-            "image_url": image_url,
-            "thumbnail_url": thumbnail_url,
-            "page_url": page_url,
-            "page_title": page_title,
-            "provider": self.name,
-        }
-        return result
-
-    @staticmethod
-    def _extract_next_token(payload: dict) -> Optional[str]:
-        """Pull the next-page token from a SerpApi google_lens response."""
-        pag = payload.get("serpapi_pagination")
-        if isinstance(pag, dict):
-            tok = pag.get("next_page_token")
-            if isinstance(tok, str) and tok:
-                return tok
-        tok = payload.get("next_page_token")
-        if isinstance(tok, str) and tok:
-            return tok
-        return None
-
-    # ------------------------------------------------------------------ #
-    # main entry point
-    # ------------------------------------------------------------------ #
-    def search(self, image_path: str, cursor: Optional[str] = None) -> ProviderPage:
-        # KEY-GATING (mandatory) ----------------------------------------
-        if not self.is_configured():
-            return self._not_configured_page()
-
-        # Google Lens needs a publicly fetchable image URL.
-        public_url = self._public_image_url(image_path)
-        if not public_url:
-            return self._error_page(
-                "google_lens needs a public image URL "
-                "(set OMNI_PUBLIC_BASE_URL so the query face is reachable)"
-            )
-
-        params = {
-            "engine": self.engine,
-            "url": public_url,
-            "api_key": self.api_key,
-        }
-        page_token = self._decode_cursor(cursor)
-        if page_token:
-            params["page_token"] = page_token
-
-        # network + parse, all errors degrade to an honest empty page --------
-        try:
-            with httpx.Client(timeout=_REQUEST_TIMEOUT_SEC) as client:
-                resp = client.get(SERPAPI_ENDPOINT, params=params)
-        except httpx.TimeoutException:
-            return self._error_page("request timed out")
-        except httpx.HTTPError as exc:
-            return self._error_page(f"network error ({type(exc).__name__})")
-        except Exception as exc:  # never let the search path break
-            return self._error_page(f"unexpected error ({type(exc).__name__})")
-
-        if resp.status_code == 401:
-            return self._error_page("unauthorized (check SERPAPI_KEY)")
-        if resp.status_code == 429:
-            return self._error_page("rate limited")
-        if resp.status_code >= 400:
-            return self._error_page(f"HTTP {resp.status_code}")
+    def _scrape(self, image_path: str) -> ProviderPage:
+        def action(page, cap):
+            for sel in _CONSENT_SELECTORS:
+                try:
+                    page.click(sel, timeout=2000)
+                    break
+                except Exception:
+                    continue
+            if looks_blocked(page):
+                cap["blocked"] = True
+                return
+            if not try_upload(page, image_path, _FILE_SELECTORS, _REVEAL_SELECTORS):
+                cap["blocked"] = looks_blocked(page)
+                cap["no_upload"] = True
+                return
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+            if looks_blocked(page):
+                cap["blocked"] = True
+                return
+            cap["base_url"] = page.url
+            cap["raw"] = page.evaluate(_EXTRACT_JS) or []
 
         try:
-            payload = resp.json()
-        except (ValueError, json.JSONDecodeError):
-            return self._error_page("invalid JSON response")
+            cap = run_action(_UPLOAD_URL, action)
+        except Exception as exc:
+            return self._error_page(f"browser error ({type(exc).__name__})")
 
-        if not isinstance(payload, dict):
-            return self._error_page("unexpected response shape")
+        if cap.get("blocked"):
+            return self._blocked_page()
+        if cap.get("no_upload"):
+            return self._error_page("could not start image search (blocked or UI changed)")
+        if cap.get("error") and not cap.get("raw"):
+            return self._error_page(f"page error ({cap['error']})")
 
-        # SerpApi reports recoverable problems via an "error" field.
-        api_error = payload.get("error")
-        if isinstance(api_error, str) and api_error:
-            short = api_error if len(api_error) <= 120 else api_error[:117] + "..."
-            return self._error_page(short)
-
-        # Visual matches are the primary public-image hits. We also tolerate the
-        # older/alternate key names so a SerpApi schema tweak degrades to fewer
-        # results rather than an exception.
-        raw_hits = (
-            payload.get("visual_matches")
-            or payload.get("image_results")
-            or payload.get("images_results")
-            or []
-        )
-        if not isinstance(raw_hits, list):
-            raw_hits = []
-
+        base_url = cap.get("base_url") or _UPLOAD_URL
         results: list[ProviderResult] = []
-        for hit in raw_hits:
-            parsed = self._parse_hit(hit)
-            if parsed is not None:
-                results.append(parsed)
-
-        next_cursor = self._encode_cursor(self._extract_next_token(payload))
-
-        return {
-            "results": results,
-            "next_cursor": next_cursor,
-            "note": None,  # clean success
-        }
+        for hit in cap.get("raw", []):
+            image_url = absolutize(base_url, hit.get("image_url"))
+            if not image_url:
+                continue
+            results.append(
+                {
+                    "image_url": image_url,
+                    "thumbnail_url": absolutize(base_url, hit.get("thumbnail_url")) or image_url,
+                    "page_url": absolutize(base_url, hit.get("page_url")),
+                    "page_title": hit.get("page_title") or None,
+                    "provider": self.name,
+                }
+            )
+        return self._ok_page(results)

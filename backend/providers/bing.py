@@ -1,239 +1,102 @@
 """
 backend/providers/bing.py
 
-Reverse-image-search provider: Bing Images via SerpApi (engine="bing_images").
+Bing Visual Search provider (browser automation via Scrapling, no API key).
 
-Pipeline role: given the cropped *query face* JPEG, ask Bing Images (through
-SerpApi) for visually-similar PUBLIC images and return them as normalized
-``ProviderResult`` dicts. Downstream the route downloads each thumbnail,
-re-embeds the largest face, and scores cosine similarity — this provider only
-surfaces public URLs, never identities, never fabricated hits.
+Flow (see base.Provider): open Bing Images, open "search by image", upload the
+cropped query-face JPEG, wait for the visual-search results, and scrape up to 20
+public hits. Bing exposes clean per-image metadata on its image cards
+(``a.iusc`` carries an ``m`` attribute JSON with murl/turl/purl/t), which we
+parse; a generic card fallback covers layout drift.
 
-HONESTY / SAFETY (mandatory):
-  * Gated on SERPAPI_KEY. With no key -> [] + "provider not configured" note.
-  * Any API/network/parse error -> [] + short note. Catch, never raise.
-  * Never fabricates results.
-
-SerpApi bing_images specifics
------------------------------
-The Bing reverse-image search needs a publicly fetchable image URL (param
-``imgurl``), not a raw local file upload. The cropped query face lives on local
-disk, so to query Bing it must be reachable over HTTP. We expose it via the
-optional env var ``OMNI_PUBLIC_BASE_URL``: when set, the backend's
-/api/search/{id}/query-face endpoint (which serves exactly this JPEG) is publicly
-reachable and we hand SerpApi that URL.
-
-If ``OMNI_PUBLIC_BASE_URL`` is NOT set we cannot give Bing a fetchable image, so
-we return [] with an honest note rather than fabricating — the rest of the
-pipeline still runs and reports the state truthfully.
-
-Pagination: the SerpApi bing_images engine paginates with an integer ``first``
-result offset (1-based; first page omits it). We encode the NEXT offset into the
-opaque cursor as JSON ``{"first": N}``; ``None`` when no further pages exist.
+Honesty/safety: never fabricates; detects CAPTCHA/anti-bot and reports "blocked";
+no proxies, no CAPTCHA bypass, capped at 20.
 """
 
 from __future__ import annotations
 
-import json
-import os
-from typing import Optional
-
-import httpx
-
 from .base import Provider, ProviderPage, ProviderResult
+from ._browser import absolutize, looks_blocked, run_action, try_upload
 
-SERPAPI_ENDPOINT = "https://serpapi.com/search.json"
-_REQUEST_TIMEOUT_SEC = 20.0
+_IMAGES_URL = "https://www.bing.com/images"
+_RESULT_SELECTOR = "a.iusc, .mc_vtvc, .richImage"
+_FILE_SELECTORS = ("input[type=file]",)
+_REVEAL_SELECTORS = ("#sb_sbip", "#sb_sbi", ".sbi_camera", "[aria-label*='image' i]")
 
-# Bing returns results in pages; ``first`` is the 1-based offset of the first
-# result on the requested page. We advance by this stride between pages.
-_BING_PAGE_STRIDE = 35
+_EXTRACT_JS = r"""
+() => {
+  const out = []; const pushed = new Set();
+  const add = (image_url, thumbnail_url, page_url, page_title) => {
+    if (!image_url || pushed.has(image_url)) return;
+    pushed.add(image_url);
+    out.push({ image_url, thumbnail_url: thumbnail_url || null,
+               page_url: page_url || null, page_title: page_title || null });
+  };
+  // Cards with structured metadata (best signal).
+  document.querySelectorAll('a.iusc').forEach(a => {
+    const m = a.getAttribute('m'); if (!m) return;
+    try { const d = JSON.parse(m); add(d.murl || d.turl, d.turl || d.murl, d.purl, d.t || null); }
+    catch (e) {}
+  });
+  // Visual-search "similar images" / "pages" card fallback.
+  document.querySelectorAll('.mc_vtvc, .richImage, .imgpt').forEach(card => {
+    const img = card.querySelector('img');
+    const a = card.querySelector('a[href]');
+    const thumb = img ? (img.src || img.getAttribute('data-src')) : null;
+    add(thumb, thumb, a ? a.href : null, img && img.alt ? img.alt.trim() : null);
+  });
+  return out.slice(0, 60);
+}
+"""
 
 
 class BingProvider(Provider):
     name = "bing"
-    engine = "bing_images"
 
-    # ------------------------------------------------------------------ #
-    # cursor (de)serialization — opaque JSON string the route round-trips
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _decode_first(cursor: Optional[str]) -> int:
-        """Return the 1-based ``first`` offset carried inside the opaque cursor.
-
-        ``None``/unparseable cursor => 0 (first page, ``first`` param omitted).
-        """
-        if not cursor:
-            return 0
-        try:
-            data = json.loads(cursor)
-        except (ValueError, TypeError):
-            return 0
-        if isinstance(data, dict):
-            first = data.get("first")
-            if isinstance(first, int) and first >= 0:
-                return first
-        return 0
-
-    @staticmethod
-    def _encode_first(first: Optional[int]) -> Optional[str]:
-        """Wrap a next ``first`` offset into the opaque cursor JSON, or None when exhausted."""
-        if first is None:
-            return None
-        return json.dumps({"first": first})
-
-    # ------------------------------------------------------------------ #
-    # public image URL for the query-face JPEG (required by bing_images)
-    # ------------------------------------------------------------------ #
-    def _public_image_url(self, image_path: str) -> Optional[str]:
-        """Map the local cropped-face JPEG to a publicly fetchable URL.
-
-        Uses OMNI_PUBLIC_BASE_URL if present. The base may already point at the
-        exact query-face URL (it is per-search), or at the backend root in which
-        case we append the file basename. Returns None if no public base is set.
-        """
-        base = os.environ.get("OMNI_PUBLIC_BASE_URL", "").strip()
-        if not base:
-            return None
-        if base.rstrip("/").endswith("query-face"):
-            return base
-        return base.rstrip("/") + "/" + os.path.basename(image_path)
-
-    # ------------------------------------------------------------------ #
-    # parse a single SerpApi bing_images hit into a ProviderResult
-    # ------------------------------------------------------------------ #
-    def _parse_hit(self, hit: dict) -> Optional[ProviderResult]:
-        if not isinstance(hit, dict):
-            return None
-        # SerpApi bing_images "images_results" expose:
-        #   "image" / "original" (full-res image URL),
-        #   "thumbnail" (thumb URL),
-        #   "link" / "source" (source page URL), "title" (page title).
-        image_url = (
-            hit.get("original")
-            or hit.get("image")
-            or hit.get("image_url")
-        )
-        if not image_url or not isinstance(image_url, str):
-            thumb = hit.get("thumbnail")
-            if isinstance(thumb, str) and thumb:
-                image_url = thumb
-            else:
-                return None  # no usable public image URL -> skip (never fabricate)
-
-        thumbnail_url = hit.get("thumbnail")
-        if not isinstance(thumbnail_url, str):
-            thumbnail_url = None
-
-        page_url = hit.get("link") or hit.get("source") or hit.get("source_url")
-        if not isinstance(page_url, str):
-            page_url = None
-
-        page_title = hit.get("title")
-        if not isinstance(page_title, str):
-            page_title = None
-
-        result: ProviderResult = {
-            "image_url": image_url,
-            "thumbnail_url": thumbnail_url,
-            "page_url": page_url,
-            "page_title": page_title,
-            "provider": self.name,
-        }
-        return result
-
-    @staticmethod
-    def _has_next_page(payload: dict) -> bool:
-        """Decide whether another page exists after the current one."""
-        pag = payload.get("serpapi_pagination")
-        if isinstance(pag, dict):
-            if pag.get("next") or pag.get("next_page_token"):
-                return True
-            return False
-        # No metadata: caller falls back to "advance if we got a full batch".
-        return False
-
-    # ------------------------------------------------------------------ #
-    # main entry point
-    # ------------------------------------------------------------------ #
-    def search(self, image_path: str, cursor: Optional[str] = None) -> ProviderPage:
-        # KEY-GATING (mandatory) ----------------------------------------
-        if not self.is_configured():
-            return self._not_configured_page()
-
-        # Bing reverse-image search needs a publicly fetchable image URL.
-        public_url = self._public_image_url(image_path)
-        if not public_url:
-            return self._error_page(
-                "bing needs a public image URL "
-                "(set OMNI_PUBLIC_BASE_URL so the query face is reachable)"
-            )
-
-        first = self._decode_first(cursor)
-        params = {
-            "engine": self.engine,
-            "imgurl": public_url,
-            "api_key": self.api_key,
-        }
-        if first > 0:
-            params["first"] = first
-
-        # network + parse, all errors degrade to an honest empty page --------
-        try:
-            with httpx.Client(timeout=_REQUEST_TIMEOUT_SEC) as client:
-                resp = client.get(SERPAPI_ENDPOINT, params=params)
-        except httpx.TimeoutException:
-            return self._error_page("request timed out")
-        except httpx.HTTPError as exc:
-            return self._error_page(f"network error ({type(exc).__name__})")
-        except Exception as exc:  # never let the search path break
-            return self._error_page(f"unexpected error ({type(exc).__name__})")
-
-        if resp.status_code == 401:
-            return self._error_page("unauthorized (check SERPAPI_KEY)")
-        if resp.status_code == 429:
-            return self._error_page("rate limited")
-        if resp.status_code >= 400:
-            return self._error_page(f"HTTP {resp.status_code}")
+    def _scrape(self, image_path: str) -> ProviderPage:
+        def action(page, cap):
+            if looks_blocked(page):
+                cap["blocked"] = True
+                return
+            if not try_upload(page, image_path, _FILE_SELECTORS, _REVEAL_SELECTORS):
+                cap["blocked"] = looks_blocked(page)
+                cap["no_upload"] = True
+                return
+            try:
+                page.wait_for_selector(_RESULT_SELECTOR, timeout=20000)
+            except Exception:
+                pass
+            if looks_blocked(page):
+                cap["blocked"] = True
+                return
+            cap["base_url"] = page.url
+            cap["raw"] = page.evaluate(_EXTRACT_JS) or []
 
         try:
-            payload = resp.json()
-        except (ValueError, json.JSONDecodeError):
-            return self._error_page("invalid JSON response")
+            cap = run_action(_IMAGES_URL, action)
+        except Exception as exc:
+            return self._error_page(f"browser error ({type(exc).__name__})")
 
-        if not isinstance(payload, dict):
-            return self._error_page("unexpected response shape")
+        if cap.get("blocked"):
+            return self._blocked_page()
+        if cap.get("no_upload"):
+            return self._error_page("could not start image search (upload UI changed)")
+        if cap.get("error") and not cap.get("raw"):
+            return self._error_page(f"page error ({cap['error']})")
 
-        # SerpApi reports recoverable problems via an "error" field.
-        api_error = payload.get("error")
-        if isinstance(api_error, str) and api_error:
-            short = api_error if len(api_error) <= 120 else api_error[:117] + "..."
-            return self._error_page(short)
-
-        raw_hits = (
-            payload.get("images_results")
-            or payload.get("image_results")
-            or []
-        )
-        if not isinstance(raw_hits, list):
-            raw_hits = []
-
+        base_url = cap.get("base_url") or _IMAGES_URL
         results: list[ProviderResult] = []
-        for hit in raw_hits:
-            parsed = self._parse_hit(hit)
-            if parsed is not None:
-                results.append(parsed)
-
-        # Pagination: advance ``first`` when SerpApi signals a next page, or when
-        # we received a full-looking batch (no explicit metadata but more likely).
-        if results and (self._has_next_page(payload) or len(results) >= _BING_PAGE_STRIDE):
-            next_first = (first if first > 0 else 1) + _BING_PAGE_STRIDE
-            next_cursor = self._encode_first(next_first)
-        else:
-            next_cursor = None
-
-        return {
-            "results": results,
-            "next_cursor": next_cursor,
-            "note": None,  # clean success
-        }
+        for hit in cap.get("raw", []):
+            image_url = absolutize(base_url, hit.get("image_url"))
+            if not image_url:
+                continue
+            results.append(
+                {
+                    "image_url": image_url,
+                    "thumbnail_url": absolutize(base_url, hit.get("thumbnail_url")) or image_url,
+                    "page_url": absolutize(base_url, hit.get("page_url")),
+                    "page_title": hit.get("page_title") or None,
+                    "provider": self.name,
+                }
+            )
+        return self._ok_page(results)
