@@ -37,10 +37,10 @@ import numpy as np
 # Score bands — SINGLE SOURCE OF TRUTH (mirrored verbatim in frontend/lib/bands.ts)
 # --------------------------------------------------------------------------- #
 SCORE_BANDS = [
-    {"min": 95, "max": 100, "key": "very_close", "label": "Very close visual similarity"},
-    {"min": 85, "max": 94,  "key": "strong",     "label": "Strong visual similarity"},
-    {"min": 70, "max": 84,  "key": "weak",       "label": "Weak visual similarity"},
-    {"min": 0,  "max": 69,  "key": "unrelated",  "label": "Likely unrelated"},
+    {"min": 90, "max": 100, "key": "certain",   "label": "Certain Match"},
+    {"min": 83, "max": 89,  "key": "confident", "label": "Confident Match"},
+    {"min": 70, "max": 82,  "key": "uncertain", "label": "Uncertain Match"},
+    {"min": 0,  "max": 69,  "key": "weak",      "label": "Weak Match"},
 ]
 
 # Special non-numeric band: a result thumbnail downloaded but InsightFace found no

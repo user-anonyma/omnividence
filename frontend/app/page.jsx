@@ -1,11 +1,13 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Uploader from '@/components/Uploader';
 import ResultsGrid from '@/components/ResultsGrid';
 import FilterSort from '@/components/FilterSort';
 import LoadMore from '@/components/LoadMore';
 import DetectionPanel from '@/components/DetectionPanel';
+import MatchLegend from '@/components/MatchLegend';
+import { apiGetSearch } from '@/lib/api';
 
 // Main search page. Holds search state and wires the pipeline:
 //   Uploader -> SearchResponse -> FilterSort + ResultsGrid + LoadMore
@@ -27,8 +29,12 @@ export default function HomePage() {
   const [error, setError] = useState('');
   const [filter, setFilter] = useState(DEFAULT_FILTER);
   const [detectionEnabled, setDetectionEnabled] = useState(false);
+  // Streaming search state: 'running' while providers are still being fetched in
+  // the background, 'done' when finished. progress climbs 0..100.
+  const [status, setStatus] = useState('done');
+  const [progress, setProgress] = useState(0);
 
-  // Honest notes from the backend (e.g. "yandex: provider not configured").
+  // Honest notes from the backend (e.g. "yandex: blocked").
   const notes = search?.note || [];
   const searchId = search?.search_id || '';
 
@@ -40,8 +46,59 @@ export default function HomePage() {
     setHasMore(Boolean(res?.has_more));
     setFilter(DEFAULT_FILTER);
     setError('');
-    setBusy(false);
+    const st = res?.status || 'done';
+    setStatus(st);
+    setProgress(typeof res?.progress === 'number' ? res.progress : st === 'done' ? 100 : 0);
+    // Stay "busy" while the background fan-out is still running (we poll below).
+    setBusy(st === 'running');
   }
+
+  // Poll for streaming results + progress while a search is running. The bar is
+  // driven by max(backend progress, a time-based estimate) so it always creeps
+  // forward smoothly even when a single provider gives coarse 5%->done steps.
+  const startRef = useRef(0);
+  const backendProgRef = useRef(5);
+  useEffect(() => {
+    if (status !== 'running' || !searchId) return undefined;
+    let cancelled = false;
+    startRef.current = Date.now();
+    backendProgRef.current = 5;
+
+    const poll = async () => {
+      try {
+        const res = await apiGetSearch(searchId);
+        if (cancelled) return;
+        setResults(Array.isArray(res?.results) ? res.results : []);
+        setHasMore(Boolean(res?.has_more));
+        if (Array.isArray(res?.note)) setSearch((s) => ({ ...(s || {}), note: res.note }));
+        if (typeof res?.progress === 'number') {
+          backendProgRef.current = Math.max(backendProgRef.current, res.progress);
+        }
+        if (res?.status === 'done') {
+          setStatus('done');
+          setProgress(100);
+          setBusy(false);
+        }
+      } catch (_e) {
+        // transient poll error — keep trying; the search runs server-side
+      }
+    };
+    const smooth = () => {
+      const elapsed = (Date.now() - startRef.current) / 1000;
+      const estimate = Math.min(92, 5 + (elapsed / 45) * 87); // ~45s to 92%
+      setProgress((p) => Math.max(p, Math.round(Math.max(backendProgRef.current, estimate))));
+    };
+
+    const pollId = setInterval(poll, 2500);
+    const smoothId = setInterval(smooth, 500);
+    poll();
+    smooth();
+    return () => {
+      cancelled = true;
+      clearInterval(pollId);
+      clearInterval(smoothId);
+    };
+  }, [status, searchId]);
 
   function handleError(msg) {
     setError(msg || 'Something went wrong.');
@@ -90,62 +147,103 @@ export default function HomePage() {
 
   const hasSearched = search !== null;
 
+  const certainCount = results.filter((r) => (r.score ?? 0) >= 90).length;
+
   return (
     <main className="app-main">
       <header className="app-header">
-        <h1>Omnividence</h1>
-        <p className="subtitle">
-          Face similarity search across public images. Upload a photo to find
-          visually similar faces. This is a school demo, not an identity tool.
-        </p>
+        <h1>
+          Omni<span className="app-header__accent">vidence</span>
+        </h1>
+        <p className="subtitle">Find similar faces across public images by photo.</p>
       </header>
-
-      <section className="panel">
-        <Uploader
-          onResult={handleResult}
-          onError={handleError}
-          onFile={setFile}
-          onStart={() => setBusy(true)}
-          busy={busy}
-        />
-      </section>
 
       {error ? <div className="error-banner">{error}</div> : null}
 
-      {hasSearched ? (
-        <>
-          {notes.length > 0 ? (
-            <div className="notes">
-              <strong>Notes</strong>
-              <ul>
-                {notes.map((n, i) => (
-                  <li key={i}>{n}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-
-          <FilterSort results={results} value={filter} onChange={setFilter} />
-
-          <ResultsGrid results={visibleResults} searchId={searchId} notes={notes} />
-
-          <div className="load-more-wrap">
-            <LoadMore
-              searchId={searchId}
-              hasMore={hasMore}
-              busy={busy}
-              onMore={handleMore}
-              onError={handleError}
-            />
-          </div>
-
-          <DetectionPanel
-            file={file}
-            enabled={detectionEnabled}
-            onToggle={setDetectionEnabled}
+      <section className="layout">
+        {/* LEFT: the input image + search controls, pinned top-left */}
+        <aside className="layout__left">
+          <Uploader
+            onResult={handleResult}
+            onError={handleError}
+            onFile={setFile}
+            onStart={() => setBusy(true)}
+            busy={busy}
           />
-        </>
-      ) : null}
+          {hasSearched ? (
+            <DetectionPanel
+              file={file}
+              enabled={detectionEnabled}
+              onToggle={setDetectionEnabled}
+            />
+          ) : null}
+        </aside>
+
+        {/* RIGHT: legend + progress + the (smaller) results grid */}
+        <div className="layout__right">
+          {hasSearched ? (
+            <>
+              <MatchLegend />
+
+              {status === 'running' ? (
+                <div className="search-progress" role="status" aria-live="polite">
+                  <div className="search-progress__label">
+                    Searching public images… {progress}%
+                    {results.length > 0 ? ` · ${results.length} found` : ''}
+                  </div>
+                  <div className="search-progress__track">
+                    <div
+                      className="search-progress__bar"
+                      style={{ width: `${Math.max(3, Math.min(100, progress))}%` }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="results-summary">
+                  {results.length > 0
+                    ? `${results.length} match${results.length === 1 ? '' : 'es'}${
+                        certainCount > 0 ? ` · ${certainCount} certain` : ''
+                      }`
+                    : 'Search complete'}
+                </div>
+              )}
+
+              {notes.length > 0 ? (
+                <div className="notes">
+                  <ul>
+                    {notes.map((n, i) => (
+                      <li key={i}>{n}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {results.length > 0 ? (
+                <FilterSort results={results} value={filter} onChange={setFilter} />
+              ) : null}
+
+              <ResultsGrid results={visibleResults} searchId={searchId} notes={notes} />
+
+              <div className="load-more-wrap">
+                <LoadMore
+                  searchId={searchId}
+                  hasMore={hasMore}
+                  busy={busy}
+                  onMore={handleMore}
+                  onError={handleError}
+                />
+              </div>
+            </>
+          ) : (
+            <div className="right-placeholder">
+              <p>Drop a clear, front-facing photo on the left to begin.</p>
+              <p className="right-placeholder__sub">
+                Matches appear here, ranked by face similarity, highest first.
+              </p>
+            </div>
+          )}
+        </div>
+      </section>
     </main>
   );
 }

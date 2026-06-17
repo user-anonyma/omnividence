@@ -58,8 +58,15 @@ ImageInput = Union[bytes, bytearray, str, os.PathLike, np.ndarray]
 # ----------------------------------------------------------------------------
 _model = None  # type: ignore[var-annotated]
 _model_lock = threading.Lock()
-_MODEL_NAME = "buffalo_l"
-_DET_SIZE = (640, 640)
+# buffalo_s (lightweight SCRFD-500M detector + MobileFace recogniser) is ~11x
+# faster per image than buffalo_l on a no-AVX CPU, which is what makes embedding
+# dozens of result thumbnails feasible here. Slightly less accurate than the
+# heavyweight model, but plenty discriminative for similarity ranking.
+_MODEL_NAME = "buffalo_s"
+# 320 (not 640) detection input: result thumbnails are small and the face fills
+# most of the frame, so 320 detects fine and is ~4x faster per image on CPU —
+# critical when embedding dozens of thumbnails on a small box.
+_DET_SIZE = (320, 320)
 # SCRFD detection confidence floor. InsightFace defaults to 0.5, which can just
 # miss otherwise-clear faces (e.g. some synthetic/GAN portraits score ~0.4). A
 # slightly lower floor makes the demo reliably pick up a clearly-visible
@@ -99,6 +106,11 @@ def init_model() -> None:
             name=_MODEL_NAME,
             root=_INSIGHTFACE_ROOT,
             providers=["CPUExecutionProvider"],
+            # Only the detector + ArcFace recogniser are needed for similarity.
+            # Skipping the landmark + genderage models cuts ~60% of per-image CPU,
+            # which matters a lot when embedding dozens of result thumbnails on a
+            # small box.
+            allowed_modules=["detection", "recognition"],
         )
         # ctx_id=-1 -> CPU. det_size keeps detection deterministic across inputs;
         # det_thresh lowered slightly so clearly-visible faces aren't missed.

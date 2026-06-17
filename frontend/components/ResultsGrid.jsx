@@ -32,7 +32,7 @@ export default function ResultsGrid({ results, searchId, notes }) {
   }
 
   return (
-    <div className="omni-grid">
+    <div className="card2-grid">
       {results.map((r) => (
         <ResultCard
           key={r.id ?? `${r.provider}:${r.image_url}`}

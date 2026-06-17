@@ -74,7 +74,7 @@ class GoogleLensProvider(Provider):
                 cap["no_upload"] = True
                 return
             try:
-                page.wait_for_load_state("networkidle", timeout=15000)
+                page.wait_for_load_state("networkidle", timeout=8000)
             except Exception:
                 pass
             if looks_blocked(page):

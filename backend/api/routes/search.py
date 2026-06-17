@@ -29,8 +29,10 @@ Honesty/safety guarantees enforced here:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
+import threading
 import uuid
 from typing import Optional
 
@@ -40,6 +42,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from config import (
     OMNI_MAX_RESULTS_PER_PAGE,
+    OMNI_MIN_SCORE,
     OMNI_THUMB_CACHE_DIR,
 )
 from providers import get_providers
@@ -151,37 +154,45 @@ def _process_batch(
     Then dedup+rank the batch and store. A full re-rank over ALL results of the
     search happens afterwards in the caller.
     """
-    scored_rows: list[dict] = []
-    for r in provider_results:
+    def _score_one(r: dict) -> Optional[dict]:
         image_url = r.get("image_url")
         if not image_url:
-            continue
-
-        thumb_path = cache.get_or_download_thumbnail(
-            image_url, r.get("thumbnail_url")
-        )
-
+            return None
+        thumb_path = cache.get_or_download_thumbnail(image_url, r.get("thumbnail_url"))
         score: Optional[int] = None
         if thumb_path:
             emb = face.embed_face(thumb_path)
             if emb is not None:
-                cos = ranking.cosine(query_embedding, emb)
-                score = ranking.to_score(cos)
-
+                score = ranking.to_score(ranking.cosine(query_embedding, emb))
         band = ranking.band_for(score)
-        scored_rows.append(
-            {
-                "image_url": image_url,
-                "thumbnail_url": r.get("thumbnail_url"),
-                "thumb_path": thumb_path,
-                "page_url": r.get("page_url"),
-                "page_title": r.get("page_title"),
-                "provider": r.get("provider"),
-                "score": score,
-                "band": band["key"],
-                "returned": 0,
-            }
-        )
+        return {
+            "image_url": image_url,
+            "thumbnail_url": r.get("thumbnail_url"),
+            "thumb_path": thumb_path,
+            "page_url": r.get("page_url"),
+            "page_title": r.get("page_title"),
+            "provider": r.get("provider"),
+            "score": score,
+            "band": band["key"],
+            "returned": 0,
+        }
+
+    # Download + embed + score with a SMALL pool (2 workers). Downloads are
+    # I/O-bound and onnxruntime inference is thread-safe; 2 workers matches a
+    # typical small box's core count and roughly halves the embed pass without
+    # the thrash a larger pool caused alongside the browsers.
+    scored_rows: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        for row in ex.map(_score_one, provider_results):
+            if row is None:
+                continue
+            # Keep only real face matches: drop results with no detectable face
+            # (objects from whole-image engines) and unrelated strangers below
+            # the similarity floor.
+            score = row.get("score")
+            if score is None or score < OMNI_MIN_SCORE:
+                continue
+            scored_rows.append(row)
 
     if not scored_rows:
         return
@@ -191,48 +202,69 @@ def _process_batch(
     cache.store_results(search_id, ranked)
 
 
-def _fan_out_first_page(
+def _run_search_bg(
+    search_id: str,
     face_path: str,
     requested: Optional[set[str]],
     query_embedding: np.ndarray,
-    search_id: str,
-) -> tuple[list[str], list[str]]:
-    """First-page fan-out across providers for an already-created search.
+) -> None:
+    """Background worker: fan out across providers CONCURRENTLY and write each
+    provider's results as soon as it finishes, so the frontend (polling
+    GET /api/search/{id}) sees results stream in and a progress bar climb.
 
-    Persists provider cursors and processes the downloaded batch. Returns
-    (providers_used, notes).
+    Sequential fan-out costs ~sum of providers (a minute-plus). Concurrent costs
+    ~the slowest single provider, and the fast/accurate one (Yandex) lands first.
+    Always marks the search 'done' (progress 100) at the end, even on error.
     """
-    providers_used: list[str] = []
+    providers = [
+        p for p in get_providers() if requested is None or p.name in requested
+    ]
+    total = len(providers) or 1
     notes: list[str] = []
-    batch: list[dict] = []
-
-    for provider in get_providers():
-        if requested is not None and provider.name not in requested:
-            continue
-        providers_used.append(provider.name)
-
-        page = provider.search(face_path, cursor=None)
-        note = page.get("note")
-        if note:
-            notes.append(note)
-
-        next_cursor = page.get("next_cursor")
-        cache.upsert_cursor(
-            search_id,
-            provider.name,
-            next_cursor=next_cursor,
-            page_index=1,
-            exhausted=next_cursor is None,
-        )
-
-        for res in page.get("results", []) or []:
-            res.setdefault("provider", provider.name)
-            batch.append(res)
-
-    if batch:
-        _process_batch(search_id, query_embedding, batch)
-
-    return providers_used, notes
+    done = 0
+    try:
+        if providers:
+            # Cap concurrency: each provider drives a headless browser, and on a
+            # small box (e.g. 2 cores) running 3 at once thrashes and stalls.
+            # 2 in flight keeps it responsive; the rest queue.
+            max_workers = min(2, len(providers))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futs = {ex.submit(p.search, face_path, None): p for p in providers}
+                for fut in concurrent.futures.as_completed(futs):
+                    p = futs[fut]
+                    try:
+                        page = fut.result()
+                    except Exception as exc:  # one provider must not break the rest
+                        page = {
+                            "results": [],
+                            "next_cursor": None,
+                            "note": f"{p.name}: error ({type(exc).__name__})",
+                        }
+                    note = page.get("note")
+                    if note:
+                        notes.append(note)
+                    next_cursor = page.get("next_cursor")
+                    cache.upsert_cursor(
+                        search_id,
+                        p.name,
+                        next_cursor=next_cursor,
+                        page_index=1,
+                        exhausted=next_cursor is None,
+                    )
+                    results = page.get("results") or []
+                    for res in results:
+                        res.setdefault("provider", p.name)
+                    if results:
+                        _process_batch(search_id, query_embedding, results)
+                        cache.rerank_search(search_id)
+                    done += 1
+                    # Cap running progress below 100 so 'done' is the only 100%.
+                    prog = min(95, round(done / total * 95))
+                    cache.set_search_status(
+                        search_id, "running", note=notes, progress=prog
+                    )
+    finally:
+        cache.set_search_status(search_id, "done", note=notes, progress=100)
 
 
 # --------------------------------------------------------------------------- #
@@ -313,7 +345,7 @@ async def post_search(
     except Exception:
         query_thumb_path = None  # honest: query-face image just won't be available
 
-    # --- persist the search row (cache owns the uuid) ---
+    # --- persist the search row as 'running' (cache owns the uuid) ---
     search_id = cache.create_search(
         query_embedding=query_embedding,
         query_face_bbox=bbox,
@@ -321,30 +353,21 @@ async def post_search(
         query_thumb_path=query_thumb_path,
         providers_used=planned,
         note=[],
+        status="running",
+        progress=5,
     )
 
-    # --- fan out across providers, download/embed/score, persist ---
-    # Send the cropped face JPEG to providers; fall back to a fresh crop if the
-    # persisted one is unavailable.
+    # --- kick off the provider fan-out in the BACKGROUND and return now ---
+    # The browser scraping takes a while; we don't hold the HTTP request open
+    # for it (that timed out behind proxies/tunnels). The frontend polls
+    # GET /api/search/{id} for streaming results + progress. Send the cropped
+    # face JPEG to providers; fall back to a fresh crop if the persist failed.
     face_path = query_thumb_path or _write_temp_face(raw, bbox)
-    providers_used, notes = _fan_out_first_page(
-        face_path,
-        requested,
-        query_embedding,
-        search_id,
-    )
-
-    # --- global re-rank across everything stored for this search ---
-    cache.rerank_search(search_id)
-
-    # --- collect this page of (unreturned) results ---
-    rows = cache.get_results(
-        search_id, only_unreturned=True, limit=OMNI_MAX_RESULTS_PER_PAGE
-    )
-    cache.mark_returned(search_id, [row["id"] for row in rows if row.get("id") is not None])
-
-    results = [_result_to_json(search_id, row) for row in rows]
-    has_more = cache.any_more_available(search_id)
+    threading.Thread(
+        target=_run_search_bg,
+        args=(search_id, face_path, requested, query_embedding),
+        daemon=True,
+    ).start()
 
     return JSONResponse(
         status_code=200,
@@ -356,10 +379,12 @@ async def post_search(
                 "det_score": det_score,
                 "query_face_url": f"/api/search/{search_id}/query-face",
             },
-            "results": results,
-            "providers_used": providers_used,
-            "has_more": has_more,
-            "note": notes,
+            "results": [],
+            "providers_used": planned,
+            "status": "running",
+            "progress": 5,
+            "has_more": False,
+            "note": [],
         },
     )
 
@@ -500,6 +525,11 @@ async def get_search(
             providers_used = [providers_used] if providers_used else []
     providers_used = providers_used or []
 
+    status = search_row.get("status") or "done"
+    progress = search_row.get("progress")
+    if progress is None:
+        progress = 100 if status == "done" else 5
+
     return JSONResponse(
         status_code=200,
         content={
@@ -508,6 +538,8 @@ async def get_search(
             "query_face": _query_face_payload(search_id, search_row),
             "results": results,
             "providers_used": providers_used,
+            "status": status,
+            "progress": int(progress),
             "has_more": cache.any_more_available(search_id),
             "note": _decode_notes(search_row.get("note")),
         },

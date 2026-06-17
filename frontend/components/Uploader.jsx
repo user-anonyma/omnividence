@@ -15,17 +15,20 @@ import { apiSearch, queryFaceUrl } from '@/lib/api';
 // never invents identity language.
 
 const ALL_PROVIDERS = [
-  { id: 'google_lens', label: 'Google Lens' },
-  { id: 'yandex', label: 'Yandex' },
-  { id: 'bing', label: 'Bing' },
+  { id: 'yandex', label: 'Yandex (best for faces)' },
+  { id: 'bing', label: 'Bing (slower, wider net)' },
+  { id: 'google_lens', label: 'Google Lens (often blocked)' },
 ];
+// Yandex is the only engine that does real face matching and it's one browser,
+// so it's fast and clean on modest hardware. The others are opt-in.
+const DEFAULT_PROVIDERS = ['yandex'];
 
 export default function Uploader({ onResult, onError, onFile, onStart, busy }) {
   const inputRef = useRef(null);
   const [file, setFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [dragOver, setDragOver] = useState(false);
-  const [providers, setProviders] = useState(ALL_PROVIDERS.map((p) => p.id));
+  const [providers, setProviders] = useState(DEFAULT_PROVIDERS);
   const [queryFaceSrc, setQueryFaceSrc] = useState(null);
   const [localNote, setLocalNote] = useState(null);
 

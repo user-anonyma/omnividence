@@ -78,6 +78,12 @@ INSIGHTFACE_ROOT: str = os.path.abspath(
 MAX_RESULTS_PER_PAGE: int = _env_int("OMNI_MAX_RESULTS_PER_PAGE", 20)
 THUMB_TIMEOUT_SEC: int = _env_int("OMNI_THUMB_TIMEOUT_SEC", 10)
 
+# Minimum face-similarity score (0-100) to KEEP a result. Reverse-image engines
+# (esp. Bing/Google Lens) return whole-image matches — objects with no face, and
+# unrelated strangers. We drop anything with no detectable face and anything
+# scoring below this floor, so the grid shows real face matches only.
+MIN_SCORE: int = _env_int("OMNI_MIN_SCORE", 50)
+
 # Hard upper bound on an accepted upload (~10MB) — enforced in the route.
 MAX_UPLOAD_BYTES: int = _env_int("OMNI_MAX_UPLOAD_BYTES", 10 * 1024 * 1024)
 
@@ -101,6 +107,7 @@ OMNI_THUMB_CACHE_DIR = THUMB_CACHE_DIR
 OMNI_INSIGHTFACE_ROOT = INSIGHTFACE_ROOT
 OMNI_MAX_RESULTS_PER_PAGE = MAX_RESULTS_PER_PAGE
 OMNI_THUMB_TIMEOUT_SEC = THUMB_TIMEOUT_SEC
+OMNI_MIN_SCORE = MIN_SCORE
 OMNI_MAX_UPLOAD_BYTES = MAX_UPLOAD_BYTES
 OMNI_CORS_ORIGINS = CORS_ORIGINS
 

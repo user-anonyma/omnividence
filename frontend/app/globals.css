@@ -325,3 +325,233 @@ select,
 .muted {
   color: var(--muted);
 }
+
+/* Streaming search progress bar */
+.search-progress {
+  margin: 16px 0;
+}
+.search-progress__label {
+  font-size: 0.9rem;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.search-progress__track {
+  width: 100%;
+  height: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.search-progress__bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.5s ease;
+}
+
+/* ============================================================
+   FaceCheck-style results UI
+   ============================================================ */
+.app-main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px 18px 60px;
+}
+.app-header {
+  text-align: center;
+  margin: 8px 0 22px;
+}
+.app-header h1 {
+  font-size: 1.9rem;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  margin: 0;
+}
+.app-header__accent {
+  color: var(--accent);
+}
+.app-header .subtitle {
+  color: var(--muted);
+  margin: 6px 0 0;
+  font-size: 0.95rem;
+}
+
+/* two-column: input pinned left, results grid on the right */
+.layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 22px;
+  align-items: start;
+}
+.layout__left {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.layout__right {
+  min-width: 0;
+}
+
+/* keep the input panel compact in the two-column view */
+.layout__left .omni-dropzone {
+  padding: 14px;
+}
+.layout__left .omni-uploader__previews {
+  gap: 8px;
+}
+.layout__left .omni-uploader__fig img {
+  max-width: 128px;
+  max-height: 150px;
+}
+.layout__left .omni-providers {
+  font-size: 0.82rem;
+}
+
+.right-placeholder {
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 40px 24px;
+  text-align: center;
+  color: var(--muted);
+  background: var(--panel-2);
+}
+.right-placeholder__sub {
+  font-size: 0.85rem;
+  margin-top: 6px;
+}
+
+/* score-tier legend */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 14px;
+}
+.legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.legend__pill {
+  color: #0b0f14;
+  font-weight: 700;
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.legend__label {
+  white-space: nowrap;
+}
+
+.results-summary {
+  font-size: 0.9rem;
+  color: var(--muted);
+  margin: 4px 0 14px;
+}
+
+/* the smaller results grid */
+.card2-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+}
+.card2 {
+  position: relative;
+  display: block;
+  aspect-ratio: 3 / 4;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  text-decoration: none;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+.card2:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+}
+.card2__img,
+.card2__img img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.card2__img img {
+  object-fit: cover;
+}
+.card2__noimg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.card2__source {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  max-width: calc(100% - 50px);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  background: rgba(8, 11, 16, 0.78);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  color: #e6edf3;
+}
+.card2__favicon {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.card2__host {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* circular score badge (overrides the old pill badge) */
+.omni-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--band-color, #6b7280);
+  color: #0b0f14;
+  font-weight: 800;
+  font-size: 0.8rem;
+  border: 2px solid rgba(8, 11, 16, 0.55);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+@media (max-width: 720px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+  .layout__left {
+    position: static;
+  }
+  .card2-grid {
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  }
+}

@@ -1,3 +1,6 @@
+// components.css first so globals.css (the newer FaceCheck-style layout + the
+// circular score badge) wins any class it intentionally overrides.
+import '../components/components.css';
 import './globals.css';
 import Disclaimer from '@/components/Disclaimer';
 

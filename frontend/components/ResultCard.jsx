@@ -5,33 +5,27 @@ import ScoreBadge from '@/components/ScoreBadge';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
-// ResultCard
-// Props: { result: Result; searchId: string }
+// ResultCard — FaceCheck-style tile: the matched face fills the card, with a
+// source chip (favicon + domain) top-left and a circular score badge top-right.
+// Clicking opens the public source page. NO names, NO identity wording.
 //
-// Result shape (from backend /api/search JSON):
-//   { id?, image_url, thumbnail_url, thumb_url, page_url, page_title,
-//     provider, score, band, band_label, rank }
-//
-// Renders: cached thumbnail (src = API_BASE + result.thumb_url, fallback to the
-// provider's thumbnail_url), provider chip, ScoreBadge, page title, and an
-// "Open source page" external link. NO names, NO identity wording — only the
-// public URLs the provider returned.
+// Result shape: { thumb_url, thumbnail_url, page_url, page_title, provider,
+//                 score, band, band_label, rank }
 
-const PROVIDER_LABELS = {
-  google_lens: 'Google Lens',
-  yandex: 'Yandex',
-  bing: 'Bing',
-};
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return null;
+  }
+}
 
 export default function ResultCard({ result }) {
-  // Primary src is the backend-cached thumbnail; on error fall back to the raw
-  // provider thumbnail_url, then to a "no preview" placeholder state.
   const cachedSrc = result.thumb_url ? `${API_BASE}${result.thumb_url}` : null;
   const [src, setSrc] = useState(cachedSrc || result.thumbnail_url || null);
   const [failed, setFailed] = useState(!cachedSrc && !result.thumbnail_url);
 
   const handleImgError = () => {
-    // If the cached thumb failed and a provider thumbnail exists, try that once.
     if (src !== result.thumbnail_url && result.thumbnail_url) {
       setSrc(result.thumbnail_url);
     } else {
@@ -39,62 +33,57 @@ export default function ResultCard({ result }) {
     }
   };
 
-  const providerLabel = PROVIDER_LABELS[result.provider] || result.provider;
+  const host = result.page_url ? hostOf(result.page_url) : null;
+  const favicon = host
+    ? `https://www.google.com/s2/favicons?domain=${host}&sz=32`
+    : null;
 
-  return (
-    <article className="omni-card">
-      <div className="omni-card__thumb">
+  const inner = (
+    <>
+      <div className="card2__img">
         {failed || !src ? (
-          <div className="omni-card__thumb-fallback" aria-hidden="true">
+          <div className="card2__noimg" aria-hidden="true">
             no preview
           </div>
         ) : (
-          // Plain <img>: these are arbitrary external/cached URLs, not optimized
-          // through next/image (see next.config.js).
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={src}
-            alt="Public image result thumbnail (visual similarity candidate)"
+            alt="Public image with a visually similar face"
             loading="lazy"
             onError={handleImgError}
           />
         )}
-        {typeof result.rank === 'number' && (
-          <span className="omni-card__rank">#{result.rank}</span>
-        )}
       </div>
 
-      <div className="omni-card__body">
-        <div className="omni-card__topline">
-          <span className="omni-card__provider">{providerLabel}</span>
-          <ScoreBadge
-            score={result.score ?? null}
-            band={result.band}
-            label={result.band_label}
-          />
-        </div>
-
-        {result.page_title && (
-          <p className="omni-card__title" title={result.page_title}>
-            {result.page_title}
-          </p>
+      <div className="card2__source">
+        {favicon && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img className="card2__favicon" src={favicon} alt="" aria-hidden="true" />
         )}
-
-        {result.page_url ? (
-          <a
-            className="omni-card__link"
-            href={result.page_url}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Open source page ↗
-          </a>
-        ) : (
-          <span className="omni-card__link omni-card__link--disabled">
-            No source page
-          </span>
-        )}
+        <span className="card2__host">{host || result.provider}</span>
       </div>
-    </article>
+
+      <ScoreBadge
+        score={result.score ?? null}
+        band={result.band}
+        label={result.band_label}
+      />
+    </>
   );
+
+  if (result.page_url) {
+    return (
+      <a
+        className="card2"
+        href={result.page_url}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={result.page_title || 'Open source page'}
+      >
+        {inner}
+      </a>
+    );
+  }
+  return <div className="card2">{inner}</div>;
 }

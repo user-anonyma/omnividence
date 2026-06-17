@@ -94,7 +94,9 @@ CREATE TABLE IF NOT EXISTS searches (
     query_face_det   REAL NOT NULL,
     query_thumb_path TEXT,
     providers_used   TEXT NOT NULL,
-    note             TEXT
+    note             TEXT,
+    status           TEXT NOT NULL DEFAULT 'done',
+    progress         INTEGER NOT NULL DEFAULT 100
 );
 
 CREATE TABLE IF NOT EXISTS results (
@@ -147,6 +149,15 @@ def init_db() -> None:
     conn = _connect()
     try:
         conn.executescript(_SCHEMA)
+        # Migrations for DBs created before the streaming columns existed.
+        for ddl in (
+            "ALTER TABLE searches ADD COLUMN status TEXT NOT NULL DEFAULT 'done'",
+            "ALTER TABLE searches ADD COLUMN progress INTEGER NOT NULL DEFAULT 100",
+        ):
+            try:
+                conn.execute(ddl)
+            except Exception:
+                pass  # column already exists
         conn.commit()
     finally:
         conn.close()
@@ -162,11 +173,14 @@ def create_search(
     query_thumb_path: Optional[str],
     providers_used: list[str],
     note: list[str],
+    status: str = "done",
+    progress: int = 100,
 ) -> str:
     """Insert a ``searches`` row and return the new ``search_id`` (uuid4 hex).
 
     ``query_embedding`` is stored as 2048 raw bytes (512 float32). ``bbox``,
-    ``providers_used`` and ``note`` are JSON-encoded.
+    ``providers_used`` and ``note`` are JSON-encoded. ``status`` is 'running'
+    while a background worker is still fetching providers, else 'done'.
     """
     search_id = uuid.uuid4().hex
     conn = _connect()
@@ -175,8 +189,9 @@ def create_search(
             """
             INSERT INTO searches (
                 search_id, created_at, query_embedding, query_face_bbox,
-                query_face_det, query_thumb_path, providers_used, note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                query_face_det, query_thumb_path, providers_used, note,
+                status, progress
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 search_id,
@@ -187,12 +202,40 @@ def create_search(
                 query_thumb_path,
                 json.dumps(list(providers_used)),
                 json.dumps(list(note)),
+                status,
+                int(progress),
             ),
         )
         conn.commit()
     finally:
         conn.close()
     return search_id
+
+
+def set_search_status(
+    search_id: str,
+    status: str,
+    note: Optional[list[str]] = None,
+    progress: Optional[int] = None,
+) -> None:
+    """Update a search's status, and optionally its notes and progress (0-100)."""
+    sets = ["status = ?"]
+    vals: list[Any] = [status]
+    if note is not None:
+        sets.append("note = ?")
+        vals.append(json.dumps(list(note)))
+    if progress is not None:
+        sets.append("progress = ?")
+        vals.append(int(progress))
+    vals.append(search_id)
+    conn = _connect()
+    try:
+        conn.execute(
+            f"UPDATE searches SET {', '.join(sets)} WHERE search_id = ?", tuple(vals)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_search(search_id: str) -> Optional[dict]:

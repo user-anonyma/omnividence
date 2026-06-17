@@ -4,22 +4,25 @@ backend/providers/yandex.py
 Yandex reverse-image-search provider (browser automation via Scrapling, no API key).
 
 Flow (see base.Provider): open public Yandex Images, upload the cropped query-face
-JPEG via the "search by image" file input, wait for the CBIR results, and scrape
-up to 20 public hits — the "sites that contain this image" entries (source page
-URL + title + preview thumbnail) plus similar-image previews.
+JPEG, then navigate to Yandex's dedicated "similar images" view
+(``cbir_page=similar``) which returns a large grid of visually/face-similar public
+images (often 100-400). We scroll to load the grid and scrape the
+``.ImagesContentImage`` cards (thumbnail + source link), capped at
+``result_limit``. Downstream re-embeds each and keeps only real face matches.
 
 Honesty/safety: never fabricates; detects CAPTCHA/anti-bot and reports "blocked";
-no proxies, no CAPTCHA bypass, capped at 20. Yandex is the most automation-tolerant
-of the three engines and tends to be the best for faces.
+no proxies, no CAPTCHA bypass. Yandex is the most automation-tolerant engine and
+its similar-images grid is by far the best free source of many face matches.
 """
 
 from __future__ import annotations
+
+import re
 
 from .base import Provider, ProviderPage, ProviderResult
 from ._browser import absolutize, dismiss_consent, looks_blocked, run_action, try_upload
 
 _UPLOAD_URL = "https://yandex.com/images/"
-_RESULT_SELECTOR = ".CbirSites-Item, a.Thumb, [class*='CbirSites']"
 _FILE_SELECTORS = ("input[type=file]",)
 _REVEAL_SELECTORS = (
     "button.input__cbir-button",
@@ -28,37 +31,42 @@ _REVEAL_SELECTORS = (
     ".input__button",
 )
 
+# The similar-images grid. Each card carries a thumbnail (an avatars.mds preview
+# of a matched public image) and a link to its source. This is where the volume
+# of face matches lives.
 _EXTRACT_JS = r"""
 () => {
-  const out = []; const pushed = new Set();
-  const add = (image_url, thumbnail_url, page_url, page_title) => {
-    if (!image_url || pushed.has(image_url)) return;
-    pushed.add(image_url);
-    out.push({ image_url, thumbnail_url: thumbnail_url || null,
-               page_url: page_url || null, page_title: page_title || null });
+  const out = []; const seen = new Set();
+  const push = (img, page, title) => {
+    if (!img || seen.has(img)) return;
+    seen.add(img);
+    out.push({ image_url: img, thumbnail_url: img, page_url: page || null,
+               page_title: title || null });
   };
-  // "Sites that contain this image" — real source pages (best signal).
+  // Primary: the big similar-images grid.
+  document.querySelectorAll('.ImagesContentImage-Image').forEach(im => {
+    const src = im.src || im.getAttribute('data-src');
+    const a = im.closest('a');
+    push(src, a ? a.href : null, im.alt ? im.alt.trim() : null);
+  });
+  // Fallback: "sites that contain this image" + any thumb anchors.
   document.querySelectorAll('.CbirSites-Item').forEach(item => {
     const a = item.querySelector('a.CbirSites-ItemTitle, .CbirSites-ItemTitle a, a[href]');
-    const img = item.querySelector('img');
-    const thumb = img ? (img.src || img.getAttribute('data-src')) : null;
-    add(thumb, thumb, a ? a.href : null, a ? (a.textContent || '').trim() : null);
+    const im = item.querySelector('img');
+    const src = im ? (im.src || im.getAttribute('data-src')) : null;
+    push(src, a ? a.href : null, a ? (a.textContent || '').trim() : null);
   });
-  // Similar-image / object thumbnails: anchors with a Thumb class wrapping an img
-  // (each is a Yandex-proxied preview of a matched public image + its source link).
-  document.querySelectorAll("a.Thumb, a[class*='Thumb']").forEach(a => {
-    const img = a.querySelector('img');
-    const thumb = img ? (img.src || img.getAttribute('data-src')) : null;
-    if (!thumb) return;
-    add(thumb, thumb, a.href || null, img.alt ? img.alt.trim() : null);
-  });
-  return out.slice(0, 60);
+  return out.slice(0, 80);
 }
 """
 
 
 class YandexProvider(Provider):
     name = "yandex"
+    # Yandex's similar grid is rich; allow more than the shared default so we can
+    # surface many face matches (downstream filtering trims non-faces/strangers).
+    # Capped for sane processing time on small hardware (each is re-embedded).
+    result_limit = 45
 
     def _scrape(self, image_path: str) -> ProviderPage:
         def action(page, cap):
@@ -69,18 +77,25 @@ class YandexProvider(Provider):
                 cap["blocked"] = looks_blocked(page)
                 cap["no_upload"] = True
                 return
-            # Results load async behind a cookie banner; dismiss it then wait.
             page.wait_for_timeout(2000)
             dismiss_consent(page)
+            page.wait_for_timeout(1500)
+            # Jump to the dedicated similar-images view (the big grid).
             try:
-                page.wait_for_selector(_RESULT_SELECTOR, timeout=20000)
+                u = page.url
+                su = (
+                    re.sub(r"cbir_page=[^&]+", "cbir_page=similar", u)
+                    if "cbir_page=" in u
+                    else u + "&cbir_page=similar"
+                )
+                page.goto(su, wait_until="domcontentloaded")
+                page.wait_for_timeout(2500)
             except Exception:
                 pass
-            # The similar-images grid is lazy-loaded; scroll in steps so more
-            # thumbnails actually fetch their src before we harvest.
-            for _ in range(5):
-                page.mouse.wheel(0, 3500)
-                page.wait_for_timeout(1200)
+            # Lazy-loaded grid: scroll in steps so thumbnails fetch their src.
+            for _ in range(8):
+                page.mouse.wheel(0, 6000)
+                page.wait_for_timeout(700)
             if looks_blocked(page):
                 cap["blocked"] = True
                 return
@@ -88,7 +103,7 @@ class YandexProvider(Provider):
             cap["raw"] = page.evaluate(_EXTRACT_JS) or []
 
         try:
-            cap = run_action(_UPLOAD_URL, action)
+            cap = run_action(_UPLOAD_URL, action, nav_timeout_ms=60000)
         except Exception as exc:
             return self._error_page(f"browser error ({type(exc).__name__})")
 
