@@ -4,12 +4,15 @@ import { useRef, useState, useEffect } from 'react';
 import { apiSearch, queryFaceUrl } from '@/lib/api';
 
 // Uploader
-// Props: { onResult(res: SearchResponse): void; onError(msg: string): void; busy: boolean }
+// Props: { onResult(res): void; onError(msg): void; onFile(file): void;
+//          onStart(): void; busy: boolean }
 //
 // Drag-drop + file input (accept image/*). Calls apiSearch(file, providers).
-// Shows the chosen image preview and, after a response, the cropped query face
-// from the search response. Disabled while busy. Surfaces no_face_detected /
-// invalid_image / not-configured notes plainly — never invents identity language.
+// Surfaces the chosen File to the parent via onFile (the experimental
+// DetectionPanel consumes it) and signals search start via onStart (loading
+// state). Shows the chosen image preview and the cropped query face from the
+// response. Surfaces no_face_detected / invalid_image / blocked notes plainly —
+// never invents identity language.
 
 const ALL_PROVIDERS = [
   { id: 'google_lens', label: 'Google Lens' },
@@ -17,7 +20,7 @@ const ALL_PROVIDERS = [
   { id: 'bing', label: 'Bing' },
 ];
 
-export default function Uploader({ onResult, onError, busy }) {
+export default function Uploader({ onResult, onError, onFile, onStart, busy }) {
   const inputRef = useRef(null);
   const [file, setFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
@@ -44,6 +47,7 @@ export default function Uploader({ onResult, onError, busy }) {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(URL.createObjectURL(f));
     setFile(f);
+    onFile?.(f); // surface the File so the DetectionPanel can analyze it
   };
 
   const toggleProvider = (id) => {
@@ -63,6 +67,7 @@ export default function Uploader({ onResult, onError, busy }) {
   const submit = async () => {
     if (!file || busy) return;
     setLocalNote(null);
+    onStart?.(); // signal the parent to enter the loading state
     try {
       const chosen = providers.length ? providers : undefined;
       const res = await apiSearch(file, chosen);

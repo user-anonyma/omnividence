@@ -15,11 +15,9 @@ import DetectionPanel from '@/components/DetectionPanel';
 const DEFAULT_FILTER = { provider: 'all', band: 'all', sort: 'score_desc' };
 
 export default function HomePage() {
-  // The uploaded file, if the Uploader surfaces it (the experimental
-  // DetectionPanel consumes it). With the current Uploader contract the file is
-  // not surfaced to the parent, so this stays null and the panel shows its
-  // "choose an image" state — see the documented limitation in the handoff.
-  const [file] = useState(null);
+  // The uploaded File, surfaced by the Uploader (onFile). The experimental
+  // DetectionPanel runs its forensics on this exact file.
+  const [file, setFile] = useState(null);
   // The full SearchResponse from the backend (or null before first search).
   const [search, setSearch] = useState(null);
   // Accumulated results across the initial search + every "load more" batch.
@@ -103,7 +101,13 @@ export default function HomePage() {
       </header>
 
       <section className="panel">
-        <Uploader onResult={handleResult} onError={handleError} busy={busy} />
+        <Uploader
+          onResult={handleResult}
+          onError={handleError}
+          onFile={setFile}
+          onStart={() => setBusy(true)}
+          busy={busy}
+        />
       </section>
 
       {error ? <div className="error-banner">{error}</div> : null}
