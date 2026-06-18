@@ -2,16 +2,12 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
-import FilterSort from '@/components/FilterSort';
-import ResultsGrid from '@/components/ResultsGrid';
+import { SCORE_BANDS } from '@/lib/bands';
+import ResultCard from '@/components/ResultCard';
 import { apiGetSearch } from '@/lib/api';
 
-// Deep-link to a cached search. Fetches via apiGetSearch(id) (no provider calls)
-// and renders the same FilterSort + ResultsGrid as the home page. Read-only:
-// it shows whatever was persisted for this search_id. No identity language.
-
-const DEFAULT_FILTER = { source: 'all', band: 'all', sort: 'score_desc' };
-
+// Deep-link to a cached search (read-only). Renders the same card grid + legend
+// as the main results screen, in the new design.
 export default function CachedSearchPage() {
   const params = useParams();
   const id = Array.isArray(params?.id) ? params.id[0] : params?.id;
@@ -19,84 +15,74 @@ export default function CachedSearchPage() {
   const [search, setSearch] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [filter, setFilter] = useState(DEFAULT_FILTER);
+  const [shown, setShown] = useState(48);
 
   useEffect(() => {
     let cancelled = false;
     if (!id) return;
-    setLoading(true);
-    setError('');
     apiGetSearch(id)
-      .then((res) => {
-        if (!cancelled) {
-          setSearch(res);
-          setLoading(false);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setError(err?.message || 'Could not load this search.');
-          setLoading(false);
-        }
-      });
+      .then((res) => !cancelled && (setSearch(res), setLoading(false)))
+      .catch((err) => !cancelled && (setError(err?.message || 'Could not load this search.'), setLoading(false)));
     return () => {
       cancelled = true;
     };
   }, [id]);
 
-  const results = search?.results || [];
-  const notes = search?.note || [];
-  const searchId = search?.search_id || id || '';
-
-  const visibleResults = useMemo(() => {
-    let rows = results.slice();
-    if (filter.source && filter.source !== 'all') {
-      rows = rows.filter((r) => (r.source_category || 'other') === filter.source);
-    }
-    if (filter.band && filter.band !== 'all') {
-      rows = rows.filter((r) => r.band === filter.band);
-    }
-    const dir = filter.sort === 'score_asc' ? 1 : -1;
-    rows.sort((a, b) => {
-      const sa = a.score === null || a.score === undefined ? -1 : a.score;
-      const sb = b.score === null || b.score === undefined ? -1 : b.score;
-      if (sa !== sb) return (sa - sb) * dir;
-      if (a.provider !== b.provider) return a.provider < b.provider ? -1 : 1;
-      return a.image_url < b.image_url ? -1 : a.image_url > b.image_url ? 1 : 0;
-    });
+  const results = useMemo(() => {
+    const rows = Array.isArray(search?.results) ? search.results.slice() : [];
+    rows.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
     return rows;
-  }, [results, filter]);
+  }, [search]);
+
+  const certain = results.filter((r) => (r.score ?? 0) >= 90).length;
 
   return (
-    <main className="app-main">
-      <header className="app-header">
-        <h1>Omnividence</h1>
-        <p className="subtitle">
-          Cached search results. Face similarity over public images only; this is
-          a school demo and does not confirm identity.
-        </p>
-      </header>
+    <div className="results" style={{ gridTemplateColumns: '1fr' }}>
+      <section className="results__right">
+        <div className="legend">
+          {SCORE_BANDS.map((b) => (
+            <span className="legend__item" key={b.key}>
+              <span className="legend__dot" style={{ background: b.color }} />
+              {b.label}
+              <span className="legend__range">{Math.max(b.min, 50)}–{b.max}</span>
+            </span>
+          ))}
+        </div>
 
-      {loading ? <p className="muted">Loading search…</p> : null}
-      {error ? <div className="error-banner">{error}</div> : null}
-
-      {!loading && !error && search ? (
-        <>
-          {notes.length > 0 ? (
-            <div className="notes">
-              <strong>Notes</strong>
-              <ul>
-                {notes.map((n, i) => (
-                  <li key={i}>{n}</li>
-                ))}
-              </ul>
+        {loading ? (
+          <div className="notes" style={{ padding: '20px 0' }}>Loading search…</div>
+        ) : error ? (
+          <div className="error-banner">{error}</div>
+        ) : (
+          <>
+            <div className="count">
+              <span className="count__n">{results.length}</span>
+              <span className="count__l">matches</span>
+              {certain > 0 ? (
+                <>
+                  <span className="count__dot" />
+                  <span className="count__certain">{certain} certain</span>
+                </>
+              ) : null}
             </div>
-          ) : null}
-
-          <FilterSort results={results} value={filter} onChange={setFilter} />
-          <ResultsGrid results={visibleResults} searchId={searchId} notes={notes} />
-        </>
-      ) : null}
-    </main>
+            <div
+              className="card-grid"
+              style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))' }}
+            >
+              {results.slice(0, shown).map((r, i) => (
+                <ResultCard key={r.id ?? `${r.provider}:${r.image_url}`} result={r} delay={Math.min(i, 24) * 18} />
+              ))}
+            </div>
+            {results.length > shown ? (
+              <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 8 }}>
+                <button type="button" className="btn-ghost" style={{ width: 'auto' }} onClick={() => setShown((n) => n + 48)}>
+                  Show more
+                </button>
+              </div>
+            ) : null}
+          </>
+        )}
+      </section>
+    </div>
   );
 }

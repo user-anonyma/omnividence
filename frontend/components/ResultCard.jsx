@@ -1,95 +1,82 @@
 'use client';
 
 import { useState } from 'react';
-import ScoreBadge from '@/components/ScoreBadge';
+import { bandByKey, bandForScore } from '@/lib/bands';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
-// ResultCard — FaceCheck-style tile: the matched face fills the card, with a
-// source chip (favicon + domain) top-left and a circular score badge top-right.
-// Clicking opens the public source page. NO names, NO identity wording.
-//
-// Result shape: { thumb_url, thumbnail_url, page_url, page_title, provider,
-//                 score, band, band_label, rank }
+// Per-category badge color + 2-letter mark (matches the design palette).
+const CAT = {
+  instagram: { color: '#c1397f', mark: 'Ig' },
+  linkedin: { color: '#2f6fb0', mark: 'in' },
+  facebook: { color: '#3b5a9a', mark: 'Fb' },
+  twitter: { color: '#586271', mark: 'X' },
+  tiktok: { color: '#c2335a', mark: 'Tk' },
+};
 
-function hostOf(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, '');
-  } catch {
-    return null;
-  }
+function srcMeta(result) {
+  const cat = result.source_category || 'other';
+  if (CAT[cat]) return CAT[cat];
+  const name = result.source_label || result.source_domain || result.provider || '?';
+  const mark = name.replace(/^(www\.)?/, '').slice(0, 2);
+  return { color: '#4a5160', mark: mark.charAt(0).toUpperCase() + mark.slice(1) };
 }
 
-export default function ResultCard({ result }) {
-  const cachedSrc = result.thumb_url ? `${API_BASE}${result.thumb_url}` : null;
-  const [src, setSrc] = useState(cachedSrc || result.thumbnail_url || null);
-  const [failed, setFailed] = useState(!cachedSrc && !result.thumbnail_url);
+export default function ResultCard({ result, delay = 0 }) {
+  const cached = result.thumb_url ? `${API_BASE}${result.thumb_url}` : null;
+  const [src, setSrc] = useState(cached || result.thumbnail_url || null);
+  const [failed, setFailed] = useState(!cached && !result.thumbnail_url);
 
-  const handleImgError = () => {
-    if (src !== result.thumbnail_url && result.thumbnail_url) {
-      setSrc(result.thumbnail_url);
-    } else {
-      setFailed(true);
-    }
+  const onErr = () => {
+    if (src !== result.thumbnail_url && result.thumbnail_url) setSrc(result.thumbnail_url);
+    else setFailed(true);
   };
 
-  const domain = result.source_domain || (result.page_url ? hostOf(result.page_url) : null);
-  const label = result.source_label || domain || result.provider;
-  const category = result.source_category || 'other';
-  const isSocial = category !== 'other';
-  const favicon = domain
-    ? `https://www.google.com/s2/favicons?domain=${domain}&sz=32`
-    : null;
+  const band = result.band ? bandByKey(result.band) : bandForScore(result.score ?? null);
+  const { color, mark } = srcMeta(result);
+  const name = result.source_label || result.source_domain || result.provider || 'source';
+  const hasScore = typeof result.score === 'number';
 
   const inner = (
     <>
-      <div className="card2__img">
-        {failed || !src ? (
-          <div className="card2__noimg" aria-hidden="true">
-            no preview
-          </div>
-        ) : (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={src}
-            alt="Public image with a visually similar face"
-            loading="lazy"
-            onError={handleImgError}
-          />
-        )}
+      {failed || !src ? (
+        <div className="card__noimg">no preview</div>
+      ) : (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img className="card__img" src={src} alt="Visually similar face" loading="lazy" onError={onErr} />
+      )}
+      <div className="card__scrim" />
+      <div className="card__source">
+        <span className="card__src-badge" style={{ background: color }}>
+          {mark}
+        </span>
+        <span className="card__src-name">{name}</span>
       </div>
-
-      <div
-        className={`card2__source${isSocial ? ' card2__source--social' : ''}`}
-        title={domain || ''}
-      >
-        {favicon && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img className="card2__favicon" src={favicon} alt="" aria-hidden="true" />
-        )}
-        <span className="card2__host">{label}</span>
+      <div className="card__score" style={{ borderColor: band.color, color: band.color }}>
+        {hasScore ? result.score : '–'}
       </div>
-
-      <ScoreBadge
-        score={result.score ?? null}
-        band={result.band}
-        label={result.band_label}
-      />
     </>
   );
+
+  const style = { animationDelay: `${delay}ms` };
 
   if (result.page_url) {
     return (
       <a
-        className="card2"
+        className="card"
+        style={style}
         href={result.page_url}
         target="_blank"
         rel="noopener noreferrer"
-        title={result.page_title || 'Open source page'}
+        title={`${name} · ${hasScore ? result.score : ''}`}
       >
         {inner}
       </a>
     );
   }
-  return <div className="card2">{inner}</div>;
+  return (
+    <div className="card" style={style}>
+      {inner}
+    </div>
+  );
 }
