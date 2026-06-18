@@ -26,10 +26,8 @@ Score bands: **95–100** very close · **85–94** strong · **70–84** weak �
 ## Features
 
 - Face-similarity search with results sorted high→low score.
-- Three providers (Yandex is the most reliable for faces; Google Lens is often
-  blocked by anti-bot and is skipped honestly when it is).
-- Filter by provider and score band, and sort ascending/descending.
-- **Load more** to pull additional results.
+- Yandex search results (for now)
+- Filter by platform and score result, and sort by ascending/descending.
 - An **experimental forensics panel** (AI-generated / manipulation / deepfake
   heuristics) behind a toggle — clearly labeled low-confidence, not evidence.
 
@@ -40,7 +38,7 @@ Score bands: **95–100** very close · **85–94** strong · **70–84** weak �
 - Scrape private social media, or solve/bypass CAPTCHAs.
 - Invent results. A blocked or failed provider returns nothing and says so.
 
-## Run it (local only, no Docker)
+## Run it (local)
 
 Requires **Python 3.10+** and **Node.js 18+**.
 
