@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import Header from '@/components/Header';
 import Landing from '@/components/Landing';
 import Loading from '@/components/Loading';
 import Results from '@/components/Results';
@@ -152,13 +153,18 @@ export default function HomePage() {
       )}
 
       {screen === 'loading' && (
-        <Loading progress={progress} matches={results.length} previewUrl={previewUrl} />
+        <>
+          <Header />
+          <Loading progress={progress} matches={results.length} previewUrl={previewUrl} />
+        </>
       )}
 
       {screen === 'results' && (
-        <Results
-          search={search}
-          results={results}
+        <>
+          <Header />
+          <Results
+            search={search}
+            results={results}
           visibleResults={visibleResults}
           shown={shown}
           onShowMore={() => setShown((n) => n + PAGE_SIZE)}
@@ -172,8 +178,9 @@ export default function HomePage() {
           queryFaceSrc={queryFaceSrc}
           previewUrl={previewUrl}
           forensics={forensics}
-          onNewSearch={reset}
-        />
+            onNewSearch={reset}
+          />
+        </>
       )}
     </>
   );

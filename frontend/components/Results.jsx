@@ -1,7 +1,20 @@
 'use client';
 
+import { useState } from 'react';
 import { SCORE_BANDS } from '@/lib/bands';
 import ResultCard from '@/components/ResultCard';
+
+// "Your search" image layouts and grid densities (mockup switchers).
+const LAYOUTS = [
+  { key: 'stacked', glyph: '▣', title: 'Stacked' },
+  { key: 'inset', glyph: '◳', title: 'Inset' },
+  { key: 'compact', glyph: '▢', title: 'Compact' },
+];
+const DENSITIES = [
+  { key: 'dense', glyph: '▪▪▪', title: 'Dense', minmax: 116 },
+  { key: 'comfortable', glyph: '▪▪', title: 'Comfortable', minmax: 150 },
+  { key: 'spacious', glyph: '▪', title: 'Spacious', minmax: 200 },
+];
 
 const SOURCE_LABELS = {
   instagram: 'Instagram',
@@ -13,11 +26,17 @@ const SOURCE_LABELS = {
 };
 const SOURCE_ORDER = ['instagram', 'linkedin', 'facebook', 'twitter', 'tiktok', 'other'];
 
-const forensicColor = (label) => {
-  const l = (label || '').toLowerCase();
-  if (l === 'low' || l === 'authentic' || l === 'clean') return '#46c46e';
-  if (l === 'high' || l === 'likely') return '#ff7a6a';
-  return '#9aa0a8';
+const forensicColor = (level) => {
+  switch ((level || '').toLowerCase()) {
+    case 'clean':
+      return '#46c46e';
+    case 'suspicious':
+      return '#ff5a4d';
+    case 'uncertain':
+      return '#ecc94b';
+    default:
+      return '#9aa0a8';
+  }
 };
 
 export default function Results({
@@ -34,6 +53,10 @@ export default function Results({
   forensics,
   onNewSearch,
 }) {
+  const [layout, setLayout] = useState('inset');
+  const [density, setDensity] = useState('comfortable');
+  const minmax = (DENSITIES.find((d) => d.key === density) || DENSITIES[1]).minmax;
+
   const total = results.length;
   const certain = results.filter((r) => (r.score ?? 0) >= 90).length;
   const remaining = Math.max(0, visibleResults.length - shown);
@@ -51,7 +74,7 @@ export default function Results({
     return (
       <div className="forensics__row">
         <span className="forensics__k">{label}</span>
-        <span className="forensics__v" style={{ color: c ? forensicColor(c.label) : 'var(--dim)' }}>
+        <span className="forensics__v" style={{ color: c ? forensicColor(c.level) : 'var(--dim)' }}>
           {c ? (
             <>
               {c.label} <small>({typeof c.score === 'number' ? c.score.toFixed(2) : '–'})</small>
@@ -68,33 +91,51 @@ export default function Results({
     <div className="results">
       {/* LEFT */}
       <aside className="results__left">
-        <span className="panel-label">YOUR SEARCH</span>
-
-        {previewUrl ? (
-          <div className="qpic qpic__wrap">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img className="qpic__img" src={previewUrl} alt="Uploaded photo" />
-            <span className="qpic__tag">UPLOADED</span>
+        <div className="panel-head">
+          <span className="panel-label">YOUR SEARCH</span>
+          <div className="seg" role="group" aria-label="Image layout">
+            {LAYOUTS.map((l) => (
+              <button
+                key={l.key}
+                type="button"
+                className={`seg__btn${layout === l.key ? ' seg__btn--on' : ''}`}
+                title={l.title}
+                aria-pressed={layout === l.key}
+                onClick={() => setLayout(l.key)}
+              >
+                {l.glyph}
+              </button>
+            ))}
           </div>
-        ) : null}
+        </div>
 
-        {queryFaceSrc ? (
-          <div className="qpic qpic--accent qpic__wrap">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img className="qpic__img qpic__img--sq" src={queryFaceSrc} alt="Detected face" />
-            <span className="qpic__tag qpic__tag--c">DETECTED FACE</span>
-          </div>
-        ) : null}
+        <div className={`qsearch qsearch--${layout}`}>
+          {previewUrl ? (
+            <div className="qpic qpic__wrap qsearch__main">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img className="qpic__img" src={previewUrl} alt="Uploaded photo" />
+              <span className="qpic__tag">UPLOADED</span>
+            </div>
+          ) : null}
+
+          {queryFaceSrc ? (
+            <div className="qpic qpic--accent qpic__wrap qsearch__face">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img className="qpic__img qpic__img--sq" src={queryFaceSrc} alt="Detected face" />
+              <span className="qpic__tag qpic__tag--c">DETECTED FACE</span>
+            </div>
+          ) : null}
+        </div>
 
         <div className="forensics">
           <div className="panel-label" style={{ marginBottom: 12 }}>
             FORENSICS
           </div>
-          {fxRow('ai_generated', 'AI-generated likelihood')}
+          {fxRow('ai_generated', 'AI-generated')}
           <div className="forensics__div" />
-          {fxRow('manipulation_ela', 'Manipulation (ELA)')}
+          {fxRow('manipulation_ela', 'Manipulation')}
           <div className="forensics__div" />
-          {fxRow('deepfake', 'Deepfake heuristic')}
+          {fxRow('deepfake', 'Deepfake')}
         </div>
 
         <button type="button" className="btn-ghost" onClick={onNewSearch}>
@@ -174,6 +215,23 @@ export default function Results({
                 <option value="score_asc">Score: low → high</option>
               </select>
             </div>
+            <div className="filter">
+              <span className="filter__label">DENSITY</span>
+              <div className="seg" role="group" aria-label="Grid density">
+                {DENSITIES.map((d) => (
+                  <button
+                    key={d.key}
+                    type="button"
+                    className={`seg__btn${density === d.key ? ' seg__btn--on' : ''}`}
+                    title={d.title}
+                    aria-pressed={density === d.key}
+                    onClick={() => setDensity(d.key)}
+                  >
+                    {d.glyph}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -192,7 +250,7 @@ export default function Results({
             No face matches found for this photo.
           </div>
         ) : (
-          <div className="card-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))' }}>
+          <div className="card-grid" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${minmax}px, 1fr))` }}>
             {visibleResults.slice(0, shown).map((r, i) => (
               <ResultCard
                 key={r.id ?? `${r.provider}:${r.image_url}`}

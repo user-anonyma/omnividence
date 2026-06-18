@@ -1,7 +1,6 @@
 import './globals.css';
 import { IBM_Plex_Mono, Chakra_Petch } from 'next/font/google';
 import Disclaimer from '@/components/Disclaimer';
-import Header from '@/components/Header';
 import Footer from '@/components/Footer';
 
 const mono = IBM_Plex_Mono({
@@ -32,7 +31,6 @@ export default function RootLayout({ children }) {
         <div className="app-shell">
           <div className="grid-overlay" aria-hidden="true" />
           <Disclaimer />
-          <Header />
           <main className="app-main">{children}</main>
           <Footer />
         </div>
