@@ -30,8 +30,85 @@ Determinism:
 from __future__ import annotations
 
 from typing import Optional
+from urllib.parse import urlparse
 
 import numpy as np
+
+
+# --------------------------------------------------------------------------- #
+# Source classification (from a result's source URL)
+# --------------------------------------------------------------------------- #
+# Maps host substrings (incl. the platforms' image CDNs) to a friendly category.
+# Order matters: cdninstagram before fbcdn (Instagram shares Facebook's CDN).
+_SOURCE_RULES = [
+    ("instagram", ("cdninstagram.com", "instagram.com", "instagram.f")),
+    ("linkedin", ("licdn.com", "linkedin.com")),
+    ("facebook", ("fbcdn.net", "facebook.com", "fbsbx.com")),
+    ("twitter", ("twimg.com", "twitter.com", "x.com")),
+    ("tiktok", ("tiktokcdn", "tiktok.com")),
+]
+SOCIAL_CATEGORIES = {"instagram", "linkedin", "facebook", "twitter", "tiktok"}
+
+
+def source_domain(url: Optional[str]) -> Optional[str]:
+    """The bare hostname of a source URL (no www.), or None."""
+    if not url:
+        return None
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return None
+    if not host:
+        return None
+    return host[4:] if host.startswith("www.") else host
+
+
+def source_category(url: Optional[str]) -> str:
+    """One of instagram/linkedin/facebook/twitter/tiktok, else 'other'."""
+    host = source_domain(url) or ""
+    for cat, needles in _SOURCE_RULES:
+        if any(n in host for n in needles):
+            return cat
+    return "other"
+
+
+_CATEGORY_NAMES = {
+    "instagram": "Instagram",
+    "linkedin": "LinkedIn",
+    "facebook": "Facebook",
+    "twitter": "X / Twitter",
+    "tiktok": "TikTok",
+}
+
+# Friendly display names for common image hosts/CDNs (display only — does not
+# affect the social category/prioritization above).
+_HOST_NAMES = [
+    (("ytimg.com", "ggpht.com", "youtube.com", "yt3."), "YouTube"),
+    (("pinimg.com", "pinterest."), "Pinterest"),
+    (("wikimedia.org", "wikipedia.org"), "Wikipedia"),
+    (("alamy.com",), "Alamy"),
+    (("imgur.com",), "Imgur"),
+    (("redd.it", "reddit.com"), "Reddit"),
+    (("gettyimages",), "Getty Images"),
+    (("shutterstock",), "Shutterstock"),
+]
+
+
+def source_label(url: Optional[str]) -> str:
+    """Display label: the platform name for socials, a friendly name for common
+    hosts, else the bare domain."""
+    cat = source_category(url)
+    if cat != "other":
+        return _CATEGORY_NAMES.get(cat, cat.capitalize())
+    host = (source_domain(url) or "").lower()
+    for needles, name in _HOST_NAMES:
+        if any(n in host for n in needles):
+            return name
+    return source_domain(url) or "unknown"
+
+
+def is_social(url: Optional[str]) -> bool:
+    return source_category(url) in SOCIAL_CATEGORIES
 
 # --------------------------------------------------------------------------- #
 # Score bands — SINGLE SOURCE OF TRUTH (mirrored verbatim in frontend/lib/bands.ts)
@@ -143,9 +220,12 @@ def _score_sort_key(row: dict):
     else:
         has_score = 0
         neg_score = -float(score)
+    # Social-media sources rank just under the similarity score: among results
+    # with the same score, social hits (Instagram/LinkedIn/etc.) come first.
+    not_social = 0 if is_social(row.get("page_url")) else 1
     provider = row.get("provider") or ""
     image_url = row.get("image_url") or ""
-    return (has_score, neg_score, provider, image_url)
+    return (has_score, neg_score, not_social, provider, image_url)
 
 
 def rank_and_dedup(rows: list[dict]) -> list[dict]:

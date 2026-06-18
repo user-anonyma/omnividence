@@ -18,16 +18,13 @@ from __future__ import annotations
 from typing import Optional
 
 from .base import Provider, ProviderPage, ProviderResult
-from .bing import BingProvider
-from .google_lens import GoogleLensProvider
 from .yandex import YandexProvider
 
-# Provider classes in route order. Yandex is the most reliable for faces; Google
-# Lens is the most bot-hostile, so it goes last.
+# Yandex only. Bing and Google Lens were removed (whole-image matchers, noisy).
+# Their modules (bing.py, google_lens.py) are kept on disk for easy re-add; a
+# Google Cloud Vision provider may be added here later.
 PROVIDER_CLASSES: list[type[Provider]] = [
     YandexProvider,
-    BingProvider,
-    GoogleLensProvider,
 ]
 
 # Convenience: the canonical provider names in order.

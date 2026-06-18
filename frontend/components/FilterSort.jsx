@@ -5,40 +5,44 @@ import { SCORE_BANDS, NO_FACE_BAND } from '@/lib/bands';
 // FilterSort
 // Props: {
 //   results: Result[];
-//   value: { provider: string|'all'; band: BandKey|'all'; sort: 'score_desc'|'score_asc' };
+//   value: { source: string|'all'; band: BandKey|'all'; sort: 'score_desc'|'score_asc' };
 //   onChange(next): void;
 // }
 //
-// Pure client-side filter/sort control over already-loaded results. Mirrors the
-// backend query-param semantics for GET /api/search/{id} (provider, band, sort).
-// The provider dropdown is built from the providers actually present in the
-// loaded results; the band dropdown from SCORE_BANDS (+ no_face).
+// Pure client-side filter/sort control over already-loaded results. The Source
+// dropdown lets you narrow to Instagram / LinkedIn / etc. (or "Other websites").
 
-const PROVIDER_LABELS = {
-  google_lens: 'Google Lens',
-  yandex: 'Yandex',
-  bing: 'Bing',
+const SOURCE_LABELS = {
+  instagram: 'Instagram',
+  linkedin: 'LinkedIn',
+  facebook: 'Facebook',
+  twitter: 'X / Twitter',
+  tiktok: 'TikTok',
+  other: 'Other websites',
 };
+// Show social categories first, then "other".
+const SOURCE_ORDER = ['instagram', 'linkedin', 'facebook', 'twitter', 'tiktok', 'other'];
 
 export default function FilterSort({ results, value, onChange }) {
-  const providersPresent = Array.from(
-    new Set((results || []).map((r) => r.provider).filter(Boolean))
-  ).sort();
+  const categoriesPresent = new Set(
+    (results || []).map((r) => r.source_category || 'other')
+  );
+  const sourceOptions = SOURCE_ORDER.filter((c) => categoriesPresent.has(c));
 
   const set = (patch) => onChange?.({ ...value, ...patch });
 
   return (
     <div className="omni-filtersort" role="group" aria-label="Filter and sort">
       <label className="omni-filtersort__field">
-        <span>Provider</span>
+        <span>Source</span>
         <select
-          value={value.provider}
-          onChange={(e) => set({ provider: e.target.value })}
+          value={value.source}
+          onChange={(e) => set({ source: e.target.value })}
         >
-          <option value="all">All providers</option>
-          {providersPresent.map((p) => (
-            <option key={p} value={p}>
-              {PROVIDER_LABELS[p] || p}
+          <option value="all">All sources</option>
+          {sourceOptions.map((c) => (
+            <option key={c} value={c}>
+              {SOURCE_LABELS[c] || c}
             </option>
           ))}
         </select>
@@ -78,11 +82,11 @@ export default function FilterSort({ results, value, onChange }) {
 // the full loaded set, matching the backend's filter/sort semantics. Exported so
 // page.tsx can keep all results in state and compute the displayed slice.
 export function applyFilterSort(results, value) {
-  const { provider, band, sort } = value || {};
+  const { source, band, sort } = value || {};
   let out = Array.isArray(results) ? results.slice() : [];
 
-  if (provider && provider !== 'all') {
-    out = out.filter((r) => r.provider === provider);
+  if (source && source !== 'all') {
+    out = out.filter((r) => (r.source_category || 'other') === source);
   }
   if (band && band !== 'all') {
     out = out.filter((r) => r.band === band);

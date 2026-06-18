@@ -33,9 +33,12 @@ export default function ResultCard({ result }) {
     }
   };
 
-  const host = result.page_url ? hostOf(result.page_url) : null;
-  const favicon = host
-    ? `https://www.google.com/s2/favicons?domain=${host}&sz=32`
+  const domain = result.source_domain || (result.page_url ? hostOf(result.page_url) : null);
+  const label = result.source_label || domain || result.provider;
+  const category = result.source_category || 'other';
+  const isSocial = category !== 'other';
+  const favicon = domain
+    ? `https://www.google.com/s2/favicons?domain=${domain}&sz=32`
     : null;
 
   const inner = (
@@ -56,12 +59,15 @@ export default function ResultCard({ result }) {
         )}
       </div>
 
-      <div className="card2__source">
+      <div
+        className={`card2__source${isSocial ? ' card2__source--social' : ''}`}
+        title={domain || ''}
+      >
         {favicon && (
           // eslint-disable-next-line @next/next/no-img-element
           <img className="card2__favicon" src={favicon} alt="" aria-hidden="true" />
         )}
-        <span className="card2__host">{host || result.provider}</span>
+        <span className="card2__host">{label}</span>
       </div>
 
       <ScoreBadge

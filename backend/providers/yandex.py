@@ -37,26 +37,41 @@ _REVEAL_SELECTORS = (
 _EXTRACT_JS = r"""
 () => {
   const out = []; const seen = new Set();
-  const push = (img, page, title) => {
-    if (!img || seen.has(img)) return;
-    seen.add(img);
-    out.push({ image_url: img, thumbnail_url: img, page_url: page || null,
-               page_title: title || null });
-  };
-  // Primary: the big similar-images grid.
-  document.querySelectorAll('.ImagesContentImage-Image').forEach(im => {
-    const src = im.src || im.getAttribute('data-src');
-    const a = im.closest('a');
-    push(src, a ? a.href : null, im.alt ? im.alt.trim() : null);
+  // Each tile's cover link carries the REAL source image URL in its `img_url`
+  // query param (e.g. upload.wikimedia.org/..., scontent.cdninstagram.com/...,
+  // media.licdn.com/...). The thumbnail (avatars.mds) is what we embed; the
+  // img_url domain is the true source we display + filter on. The img `alt` is
+  // the source page title.
+  document.querySelectorAll('.ImagesContentImage').forEach(card => {
+    const im = card.querySelector('img');
+    const a = card.querySelector('a.ImagesContentImage-Cover, a[href]');
+    const thumb = im ? (im.src || im.getAttribute('data-src')) : null;
+    if (!thumb || seen.has(thumb)) return;
+    seen.add(thumb);
+    let source = null;
+    if (a && a.href) {
+      try { source = new URL(a.href, location.origin).searchParams.get('img_url'); }
+      catch (e) {}
+    }
+    out.push({
+      image_url: thumb,
+      thumbnail_url: thumb,
+      page_url: source || null,                 // real source image URL
+      page_title: im && im.alt ? im.alt.trim() : null,
+    });
   });
-  // Fallback: "sites that contain this image" + any thumb anchors.
+  // Fallback: "sites that contain this image" (real source pages).
   document.querySelectorAll('.CbirSites-Item').forEach(item => {
     const a = item.querySelector('a.CbirSites-ItemTitle, .CbirSites-ItemTitle a, a[href]');
     const im = item.querySelector('img');
     const src = im ? (im.src || im.getAttribute('data-src')) : null;
-    push(src, a ? a.href : null, a ? (a.textContent || '').trim() : null);
+    if (!src || seen.has(src)) return;
+    seen.add(src);
+    out.push({ image_url: src, thumbnail_url: src,
+               page_url: a ? a.href : null,
+               page_title: a ? (a.textContent || '').trim() : null });
   });
-  return out.slice(0, 80);
+  return out.slice(0, 120);
 }
 """
 
@@ -66,7 +81,8 @@ class YandexProvider(Provider):
     # Yandex's similar grid is rich; allow more than the shared default so we can
     # surface many face matches (downstream filtering trims non-faces/strangers).
     # Capped for sane processing time on small hardware (each is re-embedded).
-    result_limit = 45
+    # buffalo_s embeds at ~0.25s each, so a larger batch is affordable.
+    result_limit = 80
 
     def _scrape(self, image_path: str) -> ProviderPage:
         def action(page, cap):
@@ -93,9 +109,10 @@ class YandexProvider(Provider):
             except Exception:
                 pass
             # Lazy-loaded grid: scroll in steps so thumbnails fetch their src.
-            for _ in range(8):
+            # More scroll iterations load more of the (very large) similar grid.
+            for _ in range(14):
                 page.mouse.wheel(0, 6000)
-                page.wait_for_timeout(700)
+                page.wait_for_timeout(650)
             if looks_blocked(page):
                 cap["blocked"] = True
                 return

@@ -10,7 +10,7 @@ import { apiGetSearch } from '@/lib/api';
 // and renders the same FilterSort + ResultsGrid as the home page. Read-only:
 // it shows whatever was persisted for this search_id. No identity language.
 
-const DEFAULT_FILTER = { provider: 'all', band: 'all', sort: 'score_desc' };
+const DEFAULT_FILTER = { source: 'all', band: 'all', sort: 'score_desc' };
 
 export default function CachedSearchPage() {
   const params = useParams();
@@ -50,8 +50,8 @@ export default function CachedSearchPage() {
 
   const visibleResults = useMemo(() => {
     let rows = results.slice();
-    if (filter.provider && filter.provider !== 'all') {
-      rows = rows.filter((r) => r.provider === filter.provider);
+    if (filter.source && filter.source !== 'all') {
+      rows = rows.filter((r) => (r.source_category || 'other') === filter.source);
     }
     if (filter.band && filter.band !== 'all') {
       rows = rows.filter((r) => r.band === filter.band);

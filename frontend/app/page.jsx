@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import Uploader from '@/components/Uploader';
 import ResultsGrid from '@/components/ResultsGrid';
 import FilterSort from '@/components/FilterSort';
-import LoadMore from '@/components/LoadMore';
 import DetectionPanel from '@/components/DetectionPanel';
 import MatchLegend from '@/components/MatchLegend';
 import { apiGetSearch } from '@/lib/api';
@@ -14,7 +13,8 @@ import { apiGetSearch } from '@/lib/api';
 //   plus an optional, toggle-gated DetectionPanel (experimental forensics).
 // This page never constructs identity language; it only renders backend data.
 
-const DEFAULT_FILTER = { provider: 'all', band: 'all', sort: 'score_desc' };
+const DEFAULT_FILTER = { source: 'all', band: 'all', sort: 'score_desc' };
+const PAGE_SIZE = 24;
 
 export default function HomePage() {
   // The uploaded File, surfaced by the Uploader (onFile). The experimental
@@ -29,6 +29,8 @@ export default function HomePage() {
   const [error, setError] = useState('');
   const [filter, setFilter] = useState(DEFAULT_FILTER);
   const [detectionEnabled, setDetectionEnabled] = useState(false);
+  // How many of the (filtered) results to show; "Show more" reveals another page.
+  const [shown, setShown] = useState(PAGE_SIZE);
   // Streaming search state: 'running' while providers are still being fetched in
   // the background, 'done' when finished. progress climbs 0..100.
   const [status, setStatus] = useState('done');
@@ -45,6 +47,7 @@ export default function HomePage() {
     setResults(Array.isArray(res?.results) ? res.results : []);
     setHasMore(Boolean(res?.has_more));
     setFilter(DEFAULT_FILTER);
+    setShown(PAGE_SIZE);
     setError('');
     const st = res?.status || 'done';
     setStatus(st);
@@ -126,8 +129,8 @@ export default function HomePage() {
 
   const visibleResults = useMemo(() => {
     let rows = results.slice();
-    if (filter.provider && filter.provider !== 'all') {
-      rows = rows.filter((r) => r.provider === filter.provider);
+    if (filter.source && filter.source !== 'all') {
+      rows = rows.filter((r) => (r.source_category || 'other') === filter.source);
     }
     if (filter.band && filter.band !== 'all') {
       rows = rows.filter((r) => r.band === filter.band);
@@ -219,20 +222,33 @@ export default function HomePage() {
               ) : null}
 
               {results.length > 0 ? (
-                <FilterSort results={results} value={filter} onChange={setFilter} />
+                <FilterSort
+                  results={results}
+                  value={filter}
+                  onChange={(f) => {
+                    setFilter(f);
+                    setShown(PAGE_SIZE);
+                  }}
+                />
               ) : null}
 
-              <ResultsGrid results={visibleResults} searchId={searchId} notes={notes} />
+              <ResultsGrid
+                results={visibleResults.slice(0, shown)}
+                searchId={searchId}
+                notes={notes}
+              />
 
-              <div className="load-more-wrap">
-                <LoadMore
-                  searchId={searchId}
-                  hasMore={hasMore}
-                  busy={busy}
-                  onMore={handleMore}
-                  onError={handleError}
-                />
-              </div>
+              {visibleResults.length > shown ? (
+                <div className="load-more-wrap">
+                  <button
+                    type="button"
+                    className="omni-btn omni-btn--primary"
+                    onClick={() => setShown((n) => n + PAGE_SIZE)}
+                  >
+                    Show more ({visibleResults.length - shown} left)
+                  </button>
+                </div>
+              ) : null}
             </>
           ) : (
             <div className="right-placeholder">

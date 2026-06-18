@@ -7,28 +7,18 @@ import { apiSearch, queryFaceUrl } from '@/lib/api';
 // Props: { onResult(res): void; onError(msg): void; onFile(file): void;
 //          onStart(): void; busy: boolean }
 //
-// Drag-drop + file input (accept image/*). Calls apiSearch(file, providers).
-// Surfaces the chosen File to the parent via onFile (the experimental
-// DetectionPanel consumes it) and signals search start via onStart (loading
-// state). Shows the chosen image preview and the cropped query face from the
-// response. Surfaces no_face_detected / invalid_image / blocked notes plainly —
-// never invents identity language.
-
-const ALL_PROVIDERS = [
-  { id: 'yandex', label: 'Yandex (best for faces)' },
-  { id: 'bing', label: 'Bing (slower, wider net)' },
-  { id: 'google_lens', label: 'Google Lens (often blocked)' },
-];
-// Yandex is the only engine that does real face matching and it's one browser,
-// so it's fast and clean on modest hardware. The others are opt-in.
-const DEFAULT_PROVIDERS = ['yandex'];
+// Drag-drop + file input (accept image/*). Calls apiSearch(file). The backend
+// uses Yandex (the only provider). Surfaces the chosen File to the parent via
+// onFile (the experimental DetectionPanel consumes it) and signals search start
+// via onStart (loading state). Shows the chosen image preview and the cropped
+// query face from the response. Surfaces no_face_detected / invalid_image /
+// blocked notes plainly — never invents identity language.
 
 export default function Uploader({ onResult, onError, onFile, onStart, busy }) {
   const inputRef = useRef(null);
   const [file, setFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [dragOver, setDragOver] = useState(false);
-  const [providers, setProviders] = useState(DEFAULT_PROVIDERS);
   const [queryFaceSrc, setQueryFaceSrc] = useState(null);
   const [localNote, setLocalNote] = useState(null);
 
@@ -53,12 +43,6 @@ export default function Uploader({ onResult, onError, onFile, onStart, busy }) {
     onFile?.(f); // surface the File so the DetectionPanel can analyze it
   };
 
-  const toggleProvider = (id) => {
-    setProviders((prev) =>
-      prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]
-    );
-  };
-
   const onDrop = (e) => {
     e.preventDefault();
     setDragOver(false);
@@ -72,8 +56,7 @@ export default function Uploader({ onResult, onError, onFile, onStart, busy }) {
     setLocalNote(null);
     onStart?.(); // signal the parent to enter the loading state
     try {
-      const chosen = providers.length ? providers : undefined;
-      const res = await apiSearch(file, chosen);
+      const res = await apiSearch(file);
 
       // Honest handling of the no-face case (backend returns 422 with
       // query_face.detected=false; the api client may surface that as a thrown
@@ -154,20 +137,6 @@ export default function Uploader({ onResult, onError, onFile, onStart, busy }) {
           </div>
         )}
       </div>
-
-      <fieldset className="omni-providers" disabled={busy}>
-        <legend>Search providers</legend>
-        {ALL_PROVIDERS.map((p) => (
-          <label key={p.id} className="omni-providers__opt">
-            <input
-              type="checkbox"
-              checked={providers.includes(p.id)}
-              onChange={() => toggleProvider(p.id)}
-            />
-            {p.label}
-          </label>
-        ))}
-      </fieldset>
 
       {localNote && <p className="omni-uploader__note">{localNote}</p>}
 

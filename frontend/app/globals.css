@@ -524,6 +524,12 @@ select,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* social-source chips stand out (matches the social-priority ranking) */
+.card2__source--social {
+  background: rgba(14, 165, 233, 0.92);
+  color: #04121c;
+  font-weight: 700;
+}
 
 /* circular score badge (overrides the old pill badge) */
 .omni-badge {

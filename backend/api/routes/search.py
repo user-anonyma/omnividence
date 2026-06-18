@@ -54,7 +54,7 @@ router = APIRouter()
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 # Canonical provider names (request 'providers' subset is filtered against these).
-KNOWN_PROVIDERS = {"google_lens", "yandex", "bing"}
+KNOWN_PROVIDERS = {"yandex"}
 
 
 # --------------------------------------------------------------------------- #
@@ -93,13 +93,18 @@ def _result_to_json(search_id: str, row: dict) -> dict:
         band_key = band["key"]
     band_label = band["label"]
 
+    page_url = row.get("page_url")
     return {
         "image_url": row.get("image_url"),
         "thumbnail_url": row.get("thumbnail_url"),
         "thumb_url": f"/api/search/{search_id}/thumb/{row.get('id')}",
-        "page_url": row.get("page_url"),
+        "page_url": page_url,
         "page_title": row.get("page_title"),
         "provider": row.get("provider"),
+        # Real source of the matched image (derived from the source URL):
+        "source_domain": ranking.source_domain(page_url),
+        "source_label": ranking.source_label(page_url),
+        "source_category": ranking.source_category(page_url),  # instagram/linkedin/.../other
         "score": score,
         "band": band_key,
         "band_label": band_label,
