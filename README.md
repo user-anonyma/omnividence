@@ -1,6 +1,6 @@
 <img width="2172" height="724" alt="omnividence" src="https://github.com/user-attachments/assets/b8864c1a-0c03-44a2-a14f-f78c32c23538" />
 
-A an OSINT technical showcase.
+A reverse face search OSINT tool.
 
 Upload a photo containing a face. Omnividence finds the largest face in the image, searches public reverse image
 engines for where similar faces appear online, and ranks the results by how
