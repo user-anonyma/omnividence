@@ -1,15 +1,12 @@
-# Omnividence
+<img width="2172" height="724" alt="omnividence" src="https://github.com/user-attachments/assets/b8864c1a-0c03-44a2-a14f-f78c32c23538" />
 
-A school tech-showcase demo for **face-similarity search** — not an identity or
-surveillance tool.
+A an OSINT technical showcase.
 
-Upload a photo. Omnividence finds the largest face, searches public reverse-image
+Upload a photo containing a face. Omnividence finds the largest face in the image, searches public reverse image
 engines for where similar faces appear online, and ranks the results by how
-closely each face matches yours — shown as a **visual face similarity score**
+closely each face matches the inputed face. Shown as a **visual face similarity score**
 (0–100), highest first.
 
-> **Results are approximate visual similarity matches and do not confirm
-> identity.** (Shown on every screen in the app.)
 
 ## How it works
 
