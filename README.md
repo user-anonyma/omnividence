@@ -6,6 +6,8 @@ Omnividence takes a single photo of a person and finds where that face surfaces 
 
 Everything runs locally. No external search APIs, no keys.
 
+![Omnividence main screen](docs/main.png)
+
 ## Capabilities
 
 **Reverse face search.** Omnividence locates the strongest face in your upload, isolates it, and encodes it into a 512 dimensional face embedding using InsightFace. That embedding is the fingerprint it hunts with. It drives a real browser against public reverse image engines, pulls back candidate images, re detects a face in each one, and scores it against your subject by cosine distance. The output is a confidence from 0 to 100, sorted strongest first.
